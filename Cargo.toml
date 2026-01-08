@@ -1,0 +1,21 @@
+[package]
+name = "agn"
+version = "0.1.0"
+edition = "2021"
+description = "Antigravity-Native: A next-generation language with Japanese native grammar"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.11", features = ["json"] }
+winit = "0.29"
+wgpu = "0.19"
+pollster = "0.3"
+env_logger = "0.11"
+log = "0.4"
+lyon = "1.0"
+glyphon = "0.5"
+taffy = "0.3"
+image = "0.24"
+bytemuck = { version = "1.14", features = ["derive"] }

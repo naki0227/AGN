@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>AGN Web App</title>
+    <style>
+        body { font-family: 'Helvetica Neue', Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: #f0f2f5; color: #1c1e21; }
+        h1 { color: #1877f2; }
+        #agn-screen { 
+            border: none; 
+            border-radius: 12px;
+            padding: 24px; 
+            min-height: 200px;
+            background: #ffffff;
+            margin-top: 20px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .agn-output-item {
+            margin-bottom: 12px;
+            padding: 12px 16px;
+            background: #f0f2f5;
+            border-radius: 8px;
+            font-size: 16px;
+        }
+        .agn-image {
+            max-width: 100%;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .agn-component {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        /* Style Mapping (declarative to CSS) */
+        .style-blue { background-color: #1877f2; color: white; }
+        .style-blue:hover { background-color: #166fe5; }
+        .style-red { background-color: #ff3b30; color: white; }
+        
+        /* Default Button */
+        .type-button { } 
+    </style>
+</head>
+<body>
+    <h1>AGN Screen Output</h1>
+    <div id="agn-screen"></div>
+    <script type="module">
+        // Bridge function called from Rust
+        window.updateScreen = (content) => {
+            const el = document.getElementById('agn-screen');
+            
+            try {
+                // Try to parse as JSON protocol
+                const data = JSON.parse(content);
+                
+                if (data.type === 'image') {
+                    const img = document.createElement('img');
+                    img.src = data.src;
+                    img.className = 'agn-output-item agn-image';
+                    el.appendChild(img);
+                } else if (data.type === 'component') {
+                    const comp = document.createElement('button'); // Default to button for now
+                    comp.className = `agn-output-item agn-component style-${data.style.toLowerCase()} type-${data.ty.toLowerCase()}`;
+                    comp.textContent = data.ty; // Use type name as label for now
+                    el.appendChild(comp);
+                } else {
+                    throw new Error("Unknown type");
+                }
+            } catch (e) {
+                // Fallback to text
+                const div = document.createElement('div');
+                div.className = 'agn-output-item';
+                div.textContent = content;
+                el.appendChild(div);
+            }
+        };
+
+        import init from './pkg/agn_web.js';
+        
+        async function run() {
+            await init();
+            console.log("AGN Wasm module initialized");
+        }
+        
+        run();
+    </script>
+</body>
+</html>

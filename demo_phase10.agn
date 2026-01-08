@@ -1,0 +1,22 @@
+App は "Main" だ
+App の中 に
+    Card は White な Box だ
+    Card の中 に
+        ImageWrapper は Gray な Box だ
+        ImageWrapper の中 に
+            HeroImage は "hero.png" を 読み込む
+        おわり
+        
+        Content は Transparent な Box だ
+        Content の中 に
+            Title は "Beautiful UI" だ
+            Desc は "Vector Graphics Engine" だ
+        おわり
+        
+        Content を 縦並び に 置く
+    おわり
+    
+    Card を 縦並び に 置く
+おわり
+
+App を 縦並び に 置く

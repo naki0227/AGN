@@ -1,0 +1,24 @@
+App の中 に
+    カード は White な Box だ
+    カード を 縦並び に 置く
+    
+    タイトル は "Hover Me" だ
+    タイトル を 表示する
+おわり
+
+カード を 表示する
+
+// Wrap event in Card context
+CardContext の中 に
+    // Assume we are targeting "カード" (Wait, CardContext isn't a variable?)
+    // I need "カード の中 に".
+    // But "カード" is a variable.
+    // Parser allows Noun "カード".
+    // So:
+    カード の中 に
+        マウス が 上 に あるとき
+            0.5 秒 かけて 影 を 深くする
+            0.3 秒 かけて 背景 を 水色 にする
+        おわり
+    おわり
+おわり

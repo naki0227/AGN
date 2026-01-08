@@ -1,0 +1,30 @@
+背景 は "sky.png" を 読み込む
+
+カード は ガラス な パネル だ
+カード の 中 に
+    テキスト は "Hello World" だ
+    テキスト を 縦並び に 置く
+    
+    // Interaction
+    カード を 押したとき
+        0.5秒 かけて 影 を 深くする
+        // 0.5秒 かけて 背景 を 水色 にする (Not implementing color change fully yet)
+    おわり
+    
+    カード を 動かしたとき
+        // Placeholder for Drag
+    おわり
+    
+    // Hover logic (already supported via Mouse above check in parser?)
+    // Or we use new syntax?
+    // Let's use old style for hover first as fallback, or test implicit hover if "event_handlers" used.
+    // The parser supports `EventHandler` for Click/Drag.
+    // Hover is usually "Mouse Is Above".
+    // But `State::check_hover` triggers `hover` event if handlers exist!
+    // So we can use:
+    // カード を ホバーしたとき ... (Not added to parser yet)
+    // We only added Click/Drag keywords.
+    // We should stick to "押したとき".
+おわり
+
+カード を 画面 に 表示する
