@@ -9,6 +9,9 @@ pub enum Expr {
     Number(f64),
     String(String),
     Variable(String),
+    // Eeyo: 空間・時間型 (Phase 13)
+    Distance { value: f64, unit: String },
+    Duration { value: f64, unit: String },
 }
 
 /// 条件式
@@ -17,6 +20,16 @@ pub enum Condition {
     Equals(Expr, Expr),
     GreaterThan(Expr, Expr),
     LessThan(Expr, Expr),
+    // Eeyo: 空間条件
+    Nearer(Expr),   // より近い
+    Farther(Expr),  // より遠い
+}
+
+/// 空間検索フィルター
+#[derive(Debug, Clone)]
+pub struct SpatialFilter {
+    pub field: String,       // "状態", "徳"
+    pub condition: Condition,
 }
 
 /// 文（実行単位）
@@ -57,7 +70,7 @@ pub enum Statement {
         result: String,
         input: Expr,
         verb: String,
-        options: Option<String>,
+        options: Option<Expr>,
     },
     /// 画面出力: [値] を 画面 に 表示する / show [値] to Screen
     ScreenOp {
@@ -69,6 +82,18 @@ pub enum Statement {
         event: String,
         body: Vec<Statement>,
     },
+    /// 遅延実行: [時間] 後 に ... おわり / after [Time] ... end
+    DelayStatement {
+        duration: Expr,
+        body: Vec<Statement>,
+    },
+    /// アニメーション: [時間] かけて [名詞] の [プロパティ] を [値] に する
+    AnimateStatement {
+        duration: Expr,
+        target: String,
+        property: String, // "色", "サイズ", "影"
+        value: Expr,
+    },
     
     // === Phase 10: Vector Graphics & UI ===
     /// ブロック: [名詞] の 中 に ... おわり
@@ -78,24 +103,32 @@ pub enum Statement {
     },
     /// レイアウト: [リスト] を [方向] に 置く
     Layout {
-        target: String, // "これら" (These) usually, or parent implicit? 
-                        // Actually logic: "これら を 縦並び に 置く" 
-                        // "これら" refers to children of current block?
-                        // But parser doesn't know parent.
-                        // So we emit a statement "SetLayout { direction }"
+        target: String,
         direction: LayoutDirection,
     },
     
-    // === Phase 11: Motion, State & Advanced Shaders ===
-    /// アニメーション: [時間] かけて [プロパティ] を [値] にする
-    Animate {
-        duration: f64,
-        property: String, // e.g. "影", "背景"
-        target_value: Expr, // e.g. "深くする" (enum?), or Color Value
-        // Since "深くする" is a keyword/concept, maybe target_value is Expr?
-        // "背景 を 水色 に する" -> property="背景", target="水色"
-        // "影 を 深くする" -> property="影", target="深くする" (Special value?)
-        // Let's use Expr::Variable("深くする") or similar.
+    // === Eeyo: 空間・通信 (Phase 13) ===
+    /// 空間検索: [結果] は [距離] より 近い 人 で [条件] な 人 を 探す
+    SpatialSearch {
+        result: String,
+        max_distance: Expr,
+        filters: Vec<SpatialFilter>,
+    },
+    /// ビーコン発信: ビーコン を 発信する ... おわり
+    BeaconBroadcast {
+        beacon_type: String,
+        duration: Option<Expr>,
+        payload: Vec<(String, Expr)>,
+    },
+    /// 通知: [対象] に [メッセージ] を 通知する
+    Notify {
+        target: Expr,
+        message: Expr,
+    },
+    /// 徳加算: [ユーザー] に 徳 を [量] 加算する
+    TokuAccrue {
+        target: Expr,
+        amount: Expr,
     },
 }
 
@@ -144,6 +177,15 @@ impl Parser {
             Token::Number(n) => Some(Expr::Number(*n)),
             Token::String(s) => Some(Expr::String(s.clone())),
             Token::Noun(name) => Some(Expr::Variable(name.clone())),
+            // Eeyo: 空間・時間リテラル
+            Token::Distance { value, unit } => Some(Expr::Distance { 
+                value: *value, 
+                unit: unit.clone() 
+            }),
+            Token::Duration { value, unit } => Some(Expr::Duration { 
+                value: *value, 
+                unit: unit.clone() 
+            }),
             _ => None,
         }
     }
@@ -260,12 +302,18 @@ impl Parser {
 
         // 日本語: [値] を (並列で)? [動詞]
         if matches!(self.peek(1), Token::ParticleWo) {
-            return self.parse_unary_or_async();
+            // Unary, Async, or Binary Op
+            return self.parse_unary_or_async_op();
         }
         
         // 日本語: [数値] 回 繰り返す ... おわり
         if matches!(self.current(), Token::Number(_)) && matches!(self.peek(1), Token::KeywordTimes) {
             return self.parse_japanese_repeat();
+        }
+        
+        // 日本語: [時間] 秒 後 に / [時間] 秒 かけて
+        if matches!(self.current(), Token::Number(_)) && matches!(self.peek(1), Token::KeywordSeconds) {
+            return self.parse_timed_statement();
         }
         
         // 日本語: もし ... ならば ... おわり
@@ -765,7 +813,12 @@ impl Parser {
              val
         };
 
-        Ok(Statement::Animate { duration, property, target_value })
+        Ok(Statement::AnimateStatement { 
+            duration: Expr::Number(duration), 
+            target: "Unknown".to_string(), // Implicit target not supported in this legacy parser path
+            property, 
+            value: target_value 
+        })
     }
 
     fn parse_mouse_event(&mut self) -> Result<Statement, String> {
@@ -852,19 +905,52 @@ impl Parser {
                 Ok(Statement::Assignment { name, value: expr })
             }
             Token::ParticleWo => {
-                // [パス] を 読み込む
+                // [パス] を 読み込む OR [値] を 翻訳する/要約する
                 self.advance();
                 match self.current() {
                     Token::Verb(v) if v == "読み込む" => {
                         self.advance();
                         Ok(Statement::LoadAsset { target: name, path: expr })
                     }
-                    _ => Err("Expected '読み込む' after 'を' in assignment context".to_string())
+                    Token::Verb(v) if v == "翻訳する" || v == "要約する" => {
+                        // AI verb in assignment: 結果 は テキスト を 翻訳する
+                        let verb = v.clone();
+                        self.advance();
+                        Ok(Statement::AiOp { 
+                            result: name, 
+                            input: expr, 
+                            verb,
+                            options: None,
+                        })
+                    }
+                    _ => {
+                        // Try optional argument: [Input] を [Option] に [Verb]
+                        let options_expr = self.current_to_expr()?;
+                        
+                        if !matches!(self.current(), Token::ParticleNi) {
+                            return Err("Expected '読み込む', AI verb, or option followed by 'に'".to_string());
+                        }
+                        self.advance(); // skip に
+                        
+                        match self.current() {
+                             Token::Verb(v) if v == "翻訳する" || v == "要約する" => {
+                                let verb = v.clone();
+                                self.advance();
+                                Ok(Statement::AiOp { 
+                                    result: name, 
+                                    input: expr, 
+                                    verb, 
+                                    options: Some(options_expr) 
+                                })
+                             }
+                             _ => Err("Expected AI Verb after option".to_string())
+                        }
+                    }
                 }
             }
-            Token::ParticleNa => {
-                // [スタイル] な [コンポーネント] だ
-                self.advance(); // skip Na
+            Token::ParticleNa | Token::ParticleNo => {
+                // [スタイル] な/の [コンポーネント] だ
+                self.advance(); // skip Na/No
                 // Expect Component Noun
                 let component = match self.current() {
                      Token::Noun(n) => n.clone(),
@@ -880,11 +966,36 @@ impl Parser {
                 // Extract style from expr
                 let style = match expr {
                     Expr::Variable(s) => s,
-                    _ => return Err("Expected style variable".to_string()),
+                    Expr::String(s) => s, // Allow string style (e.g. content text?)
+                                          // Actually style usually is "Red". Content is different.
+                                          // But for now, treating Expr as style.
+                    _ => return Err("Expected style variable or string".to_string()),
                 };
                 Ok(Statement::ComponentDefine { target: name, style, component })
             }
-            _ => Err("Expected 'だ', 'を', or 'な'".to_string())
+            Token::Noun(component) => {
+                 // [スタイル] [コンポーネント] だ (implicit "な")
+                 let component = component.clone();
+                 self.advance();
+
+                 if matches!(self.current(), Token::ParticleDa) {
+                     self.advance();
+                     
+                     // Extract style from expr
+                    let style = match expr {
+                        Expr::Variable(s) => s,
+                        _ => return Err("Expected style variable".to_string()),
+                    };
+                    Ok(Statement::ComponentDefine { target: name, style, component })
+                 } else {
+                      // Maybe it was just an assignment value that happened to mean something else?
+                      // But current logic for Assignment is consume Value then expect Da.
+                      // If we are here, we consumed Value, and next is Noun.
+                      // Value must be Style.
+                      Err("Expected 'だ' after component definition".to_string())
+                 }
+            }
+            _ => Err("Expected 'だ', 'を', or 'な' (or Component Name)".to_string())
         }
     }
 
@@ -947,17 +1058,63 @@ impl Parser {
         Ok(Statement::BinaryOp { target, operand, verb })
     }
 
-    fn parse_unary_or_async(&mut self) -> Result<Statement, String> {
+    fn parse_unary_or_async_op(&mut self) -> Result<Statement, String> {
         let operand = self.current_to_expr()?;
 
-        if !matches!(self.current(), Token::ParticleWo) {
-            return Err("Expected 'を'".to_string());
-        }
-        self.advance();
+        
+        let mut target: Option<String> = None;
 
+        if !matches!(self.current(), Token::ParticleWo) {
+             // Maybe it was already consumed? No.
+             return Err("Expected 'を'".to_string());
+        }
+        self.advance(); // skip を
+
+        // Check for Async "並列で"
         let is_async = matches!(self.current(), Token::Adverb(a) if a == "並列で");
         if is_async {
             self.advance();
+        }
+        
+        // Check for Target "画面 に" or "画面 の 中央 に" or "[Noun] に"
+        if (matches!(self.current(), Token::ScreenNoun) || matches!(self.current(), Token::Noun(_))) {
+             // Lookahead for 'に' or 'の'
+             if matches!(self.peek(1), Token::ParticleNi) {
+                 // [Target] に
+                 target = match self.current() {
+                     Token::ScreenNoun => Some("Screen".to_string()),
+                     Token::Noun(n) => Some(n.clone()),
+                     _ => None,
+                 };
+                 self.advance(); // skip Target
+                 self.advance(); // skip に
+             } else if matches!(self.peek(1), Token::ParticleNo) {
+                 // [Target] の [Modifier] に
+                 // e.g. 画面 の 中央 に
+                 let base = match self.current() {
+                     Token::ScreenNoun => "Screen".to_string(),
+                     Token::Noun(n) => n.clone(),
+                     _ => "Unknown".to_string(),
+                 };
+                 
+                 self.advance(); // skip Base
+                 self.advance(); // skip の
+                 
+                 let modifier = match self.current() {
+                     Token::Noun(n) => n.clone(),
+                     _ => return Err("Expected modifier noun".to_string()),
+                 };
+                 self.advance(); // skip Modifier
+                 
+                 if matches!(self.current(), Token::ParticleNi) {
+                     self.advance(); // skip に
+                     target = Some(format!("{}.{}", base, modifier));
+                 } else {
+                     // Backtrack? Or Error?
+                     // If 'に' is missing, maybe it's not a target pattern.
+                     return Err("Expected 'に' after modifier".to_string());
+                 }
+             }
         }
 
         let verb = match self.current() {
@@ -965,11 +1122,94 @@ impl Parser {
             _ => return Err("Expected verb".to_string()),
         };
         self.advance();
-
-        if is_async {
+        
+        if let Some(tgt) = target {
+             // If target is present, allow it to be processed as BinaryOp or ScreenOp
+             if tgt.starts_with("Screen") && verb == "表示する" {
+                  // Special case for ScreenOp?
+                  // Actually BinaryOp { target, operand, verb } works if Interpreter handles it.
+                  Ok(Statement::BinaryOp { target: tgt, operand, verb })
+             } else {
+                  Ok(Statement::BinaryOp { target: tgt, operand, verb })
+             }
+        } else if is_async {
             Ok(Statement::AsyncOp { operand, verb })
         } else {
             Ok(Statement::UnaryOp { operand, verb })
+        }
+    }
+    fn parse_timed_statement(&mut self) -> Result<Statement, String> {
+        // [Time] 秒 後 に ... / [Time] 秒 かけて ...
+        let duration = self.current_to_expr()?;
+        // Expect "秒"
+        if !matches!(self.current(), Token::KeywordSeconds) {
+            return Err("Expected '秒'".to_string());
+        }
+        self.advance(); // skip 秒
+        
+        if matches!(self.current(), Token::KeywordAfter) {
+             // Delay: [Time] 秒 後 に ... おわり
+             self.advance(); // skip 後 (KeywordAfter)
+             
+             if !matches!(self.current(), Token::ParticleNi) {
+                 return Err("Expected 'に' after '後'".to_string());
+             }
+             self.advance(); // skip に
+             
+             let body = self.parse_block_until_end()?;
+             Ok(Statement::DelayStatement { duration, body })
+        } else if matches!(self.current(), Token::KeywordOver) {
+             // Animation: [Time] 秒 かけて [Target] の [Prop] を [Value] に する
+             self.advance(); // skip かけて (KeywordOver)
+             
+             // [Target] の
+             let target = match self.current() {
+                 Token::Noun(n) => n.clone(),
+                 _ => return Err("Expected target noun for animation".to_string()),
+             };
+             self.advance();
+             
+             if !matches!(self.current(), Token::ParticleNo) {
+                 return Err("Expected 'の' after target".to_string());
+             }
+             self.advance(); // skip の
+             
+             // [Prop] を
+             let property = match self.current() {
+                 Token::Noun(n) => n.clone(),
+                 // Allow known props if they are keywords? For now assume Noun
+                 _ => return Err("Expected property noun (色, サイズ, 影)".to_string()),
+             };
+             self.advance();
+             
+             if !matches!(self.current(), Token::ParticleWo) {
+                 return Err("Expected 'を' after property".to_string());
+             }
+             self.advance(); // skip を
+             
+             // [Value] に
+             let value = self.current_to_expr()?;
+
+             
+             if !matches!(self.current(), Token::ParticleNi) {
+                 return Err("Expected 'に' after value".to_string());
+             }
+             self.advance(); // skip に
+
+             // する
+             if !matches!(self.current(), Token::Verb(v) if v == "する") && !matches!(self.current(), Token::KeywordChange) {
+                  return Err("Expected 'する' at end of animation".to_string());
+             }
+             self.advance(); // skip する
+             
+             Ok(Statement::AnimateStatement {
+                 duration,
+                 target,
+                 property,
+                 value,
+             })
+        } else {
+             Err("Expected '後' or 'かけて' after seconds".to_string())
         }
     }
 }

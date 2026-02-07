@@ -1,0 +1,104 @@
+    Checking lazy_static v1.5.0
+    Checking agn v0.1.0 (/Users/hw24a094/ludus/agn)
+error[E0585]: found a documentation comment that doesn't document anything
+   --> src/parser.rs:102:5
+    |
+ 24 | pub enum Statement {
+    |          --------- while parsing this enum
+...
+102 |     /// アニメーション: [時間] かけて [プロパティ] を [値] にする
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: doc comments must come before what they document, if a comment was intended use `//`
+    = help: enum variants can be `Variant`, `Variant = <integer>`, `Variant(Type, ..., TypeN)` or `Variant { fields: Types }`
+
+warning: unused imports: `Duration` and `Instant`
+ --> src/interpreter.rs:9:16
+  |
+9 | use web_time::{Duration, Instant};
+  |                ^^^^^^^^  ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `tokio::sync::Mutex`
+  --> src/interpreter.rs:22:5
+   |
+22 | use tokio::sync::Mutex;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::env`
+ --> src/ai_runtime.rs:4:5
+  |
+4 | use std::env;
+  |     ^^^^^^^^
+
+warning: unused import: `crate::symbol_table::Value`
+ --> src/graphics/renderer.rs:4:5
+  |
+4 | use crate::symbol_table::Value;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `winit::platform::web::WindowExtWebSys`
+  --> src/lib.rs:22:5
+   |
+22 | use winit::platform::web::WindowExtWebSys;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0624]: method `execute_statements` is private
+   --> src/lib.rs:118:26
+    |
+118 |              interpreter.execute_statements(&body).await;
+    |                          ^^^^^^^^^^^^^^^^^^ private method
+    |
+   ::: src/interpreter.rs:105:5
+    |
+105 |     async fn execute_statements(&self, statements: &[Statement]) {
+    |     ------------------------------------------------------------ private method defined here
+
+error[E0282]: type annotations needed
+   --> src/type_inferencer.rs:169:46
+    |
+169 |                     for (idx, inner_stmt) in else_stmts.iter().enumerate() {
+    |                                              ^^^^^^^^^^ cannot infer type
+
+warning: unreachable pattern
+   --> src/graphics/state.rs:520:17
+    |
+477 |                 Value::Image(path) => {
+    |                 ------------------ matches all the relevant values
+...
+520 |                 Value::Image(_) => {
+    |                 ^^^^^^^^^^^^^^^ no value can reach this
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `s`
+   --> src/graphics/state.rs:524:31
+    |
+524 |                 Value::String(s) => {
+    |                               ^ help: if this is intentional, prefix it with an underscore: `_s`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `index_count`
+   --> src/graphics/state.rs:533:37
+    |
+533 |         let (vertex_buf, index_buf, index_count) = self.renderer.get_buffers(&self.device);
+    |                                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_index_count`
+
+warning: unused variable: `end_indices`
+   --> src/graphics/renderer.rs:129:13
+    |
+129 |         let end_indices = self.geometry.indices.len() as u32;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_end_indices`
+
+warning: unused variable: `end_indices`
+   --> src/graphics/renderer.rs:254:13
+    |
+254 |         let end_indices = self.geometry.indices.len() as u32;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_end_indices`
+
+Some errors have detailed explanations: E0282, E0585, E0624.
+For more information about an error, try `rustc --explain E0282`.
+warning: `agn` (lib) generated 10 warnings
+error: could not compile `agn` (lib) due to 3 previous errors; 10 warnings emitted

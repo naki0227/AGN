@@ -36,11 +36,16 @@ impl std::fmt::Display for Value {
             Value::Image(path) => write!(f, "[Image: {}]", path),
             Value::Component { style, ty, label, children, .. } => {
                 let count = children.len();
-                if let Some(l) = label {
-                    write!(f, "[{} {} '{}' ({} children)]", style, ty, l, count)
-                } else {
-                    write!(f, "[{} {} ({} children)]", style, ty, count)
+                // Check for string children to override content
+                let mut content = label.clone().unwrap_or(ty.clone());
+                for child in children {
+                    if let Value::String(s) = child {
+                        content = s.clone();
+                        break; // Use first string child
+                    }
                 }
+                
+                write!(f, "[{} {} '{}' ({} children)]", style, ty, content, count)
             }
             Value::Nil => write!(f, "nil"),
         }

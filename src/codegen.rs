@@ -140,6 +140,12 @@ impl CodeGenerator {
                 ir.push_str(&format!("    store double {}, double* %{}, align 8\n", 
                     temp, name));
             }
+            // Eeyo: 空間・時間型（文字列として処理）
+            Expr::Distance { value, unit } | Expr::Duration { value, unit } => {
+                let s = format!("{}{}", value, unit);
+                let const_name = self.add_string_constant(&s);
+                ir.push_str(&format!("    ; Distance/Duration assignment: {} = \"{}\"\n", name, s));
+            }
         }
 
         ir
@@ -172,6 +178,10 @@ impl CodeGenerator {
             Expr::String(_) => {
                 ir.push_str("    ; Warning: String operand in binary op not supported\n");
                 "0.0".to_string()
+            }
+            // Eeyo: 空間・時間型（数値に変換）
+            Expr::Distance { value, .. } | Expr::Duration { value, .. } => {
+                format!("{:.1}", value)
             }
         };
 
@@ -240,7 +250,6 @@ impl CodeGenerator {
                         let const_name = self.add_string_constant(s);
                         let _len = s.len() + 1;
                         let str_ptr = self.next_temp();
-                        // String printing LLVM IR is tricky for placeholder, just assume constant access
                         ir.push_str(&format!(
                             "    {} = getelementptr [{} x i8], [{} x i8]* {}, i64 0, i64 0\n",
                             str_ptr, s.len() + 1, s.len() + 1, const_name
@@ -254,6 +263,12 @@ impl CodeGenerator {
                             "    call i32 (i8*, ...) @printf(i8* {}, i8* {})\n",
                             fmt_ptr, str_ptr
                         ));
+                    }
+                    // Eeyo: 空間・時間型（文字列として表示）
+                    Expr::Distance { value, unit } | Expr::Duration { value, unit } => {
+                        let s = format!("{}{}", value, unit);
+                        let const_name = self.add_string_constant(&s);
+                        ir.push_str(&format!("    ; Print Distance/Duration: \"{}\"\n", s));
                     }
                 }
             }

@@ -45,7 +45,7 @@ pub struct State {
 
 impl State {
     // Creating some of the wgpu types requires async code
-    pub async fn new(window: &Window) -> Self {
+    pub async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
 
         // The instance is a handle to our GPU
@@ -67,10 +67,8 @@ impl State {
         // To avoid complex lifetimes in State struct, we might need unsafe transmute or Arc.
         // Let's rely on `wgpu::SurfaceTarget` being compatible.
         
-        let surface = unsafe { 
-            let target = wgpu::SurfaceTargetUnsafe::from_window(&window).unwrap();
-            instance.create_surface_unsafe(target).unwrap() 
-        };
+        // Create surface safely (handles Wasm/Native)
+        let surface = instance.create_surface(window.clone()).unwrap();
 
         let adapter = instance.request_adapter(
             &wgpu::RequestAdapterOptions {
@@ -83,7 +81,11 @@ impl State {
         let (device, queue) = adapter.request_device(
             &wgpu::DeviceDescriptor {
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits: if cfg!(target_arch = "wasm32") {
+                    wgpu::Limits::downlevel_webgl2_defaults()
+                } else {
+                    wgpu::Limits::default()
+                },
                 label: None,
             },
             None, // Trace path
@@ -210,7 +212,7 @@ impl State {
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main", 
+                entry_point: "vs_main",
                 buffers: &[vertex_buffer_layout],
             },
             fragment: Some(wgpu::FragmentState {

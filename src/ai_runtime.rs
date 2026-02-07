@@ -30,9 +30,18 @@ pub struct AiRuntime {
 
 impl AiRuntime {
     pub fn new() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
         let api_key = env::var("GEMINI_API_KEY").ok();
+        #[cfg(target_arch = "wasm32")]
+        let api_key = None;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let enabled = api_key.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let enabled = true;
+
         Self {
-            enabled: api_key.is_some(),
+            enabled,
             api_key,
             model: "gemini-2.0-flash".to_string(),
         }
@@ -72,6 +81,8 @@ impl AiRuntime {
     }
 
     /// Gemini APIを呼び出し
+    /// Gemini APIを呼び出し (Native)
+    #[cfg(not(target_arch = "wasm32"))]
     async fn call_gemini(&self, prompt: &str) -> Result<String, AiError> {
         let api_key = self.api_key.as_ref().ok_or(AiError::ApiKeyNotSet)?;
         
@@ -115,11 +126,57 @@ impl AiRuntime {
         Ok(text.trim().to_string())
     }
 
+    /// Gemini APIを呼び出し (Wasm: Proxy to /api/gemini)
+    #[cfg(target_arch = "wasm32")]
+    async fn call_gemini(&self, prompt: &str) -> Result<String, AiError> {
+        // Get origin from window.location for absolute URL
+        let origin = web_sys::window()
+            .and_then(|w| w.location().origin().ok())
+            .unwrap_or_else(|| "http://localhost:3003".to_string());
+        let url = format!("{}/api/gemini", origin);
+        
+        let body = serde_json::json!({
+            "prompt": prompt,
+            "model": self.model
+        });
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AiError::RequestFailed(e.to_string()))?;
+
+        if !response.status().is_success() {
+             // For text() on wasm, we might need await? yes.
+             // But on some error response it might be text.
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(AiError::RequestFailed(error_text));
+        }
+
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AiError::ParseError(e.to_string()))?;
+
+        // Proxy expected response: { "text": "..." }
+        let text = json["text"]
+            .as_str()
+            .ok_or_else(|| AiError::ParseError("No text in response".to_string()))?;
+
+        Ok(text.trim().to_string())
+    }
+
     /// AI動詞を実行
-    pub async fn execute_verb(&self, verb: &str, input: &str) -> Result<String, AiError> {
+    pub async fn execute_verb(&self, verb: &str, input: &str, option: Option<String>) -> Result<String, AiError> {
         match verb {
             "要約する" | "summarize" => self.summarize(input).await,
-            "翻訳する" | "translate" => self.translate(input, "英語").await,
+            "翻訳する" | "translate" => {
+                 let target = option.unwrap_or_else(|| "英語".to_string());
+                 self.translate(input, &target).await
+            },
             _ => Err(AiError::RequestFailed(format!("Unknown AI verb: {}", verb))),
         }
     }

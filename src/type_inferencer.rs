@@ -1,5 +1,6 @@
 //! AGN Type Inferencer - 意図ベースの型推論器
 //! コード全体をスキャンして変数の型と生存期間を予測する
+//! Eeyo: 次元解析（距離・時間の型安全性）
 
 use crate::parser::{Expr, Program, Statement};
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,9 @@ pub enum InferredType {
     Number,
     String,
     Unknown,
+    // Eeyo: 空間・時間型 (Phase 13)
+    Distance { unit: String },  // "m", "km"
+    Duration { unit: String },  // "秒", "分", "時間"
 }
 
 impl std::fmt::Display for InferredType {
@@ -18,6 +22,8 @@ impl std::fmt::Display for InferredType {
             InferredType::Number => write!(f, "Number"),
             InferredType::String => write!(f, "String"),
             InferredType::Unknown => write!(f, "Unknown"),
+            InferredType::Distance { unit } => write!(f, "Distance({})", unit),
+            InferredType::Duration { unit } => write!(f, "Duration({})", unit),
         }
     }
 }
@@ -166,8 +172,8 @@ impl TypeInferencer {
                 }
                 // Process statements in else block
                 if let Some(else_stmts) = else_block {
-                    for (idx, inner_stmt) in else_stmts.iter().enumerate() {
-                        self.process_statement(inner_stmt, line_num + idx, variables);
+                    for (i, inner_stmt) in else_stmts.iter().enumerate() {
+                        self.process_statement(inner_stmt, line_num + i, variables);
                     }
                 }
             }
@@ -214,13 +220,32 @@ impl TypeInferencer {
                     var.reason = "Layout applied".to_string();
                 }
             }
-            Statement::Animate { duration: _, property: _, target_value } => {
-                // Animation might use variable in target_value
-                if let Expr::Variable(name) = target_value {
+            Statement::DelayStatement { body, .. } => {
+                // Analyze body
+                for s in body {
+                    self.process_statement(s, line_num, variables);
+                }
+            }
+            Statement::AnimateStatement { value, .. } => {
+                // Animation affects UI prop and might use variable
+                if let Expr::Variable(name) = value {
                     if let Some(var) = variables.get_mut(name) {
                         var.lifetime.end = line_num;
                     }
                 }
+            }
+            // Eeyo: 空間ステートメント（後方互換性のためスキップ）
+            Statement::SpatialSearch { result, .. } => {
+                variables.insert(result.clone(), VariableMetadata {
+                    name: result.clone(),
+                    inferred_type: InferredType::Unknown,
+                    lifetime: Lifetime { start: line_num, end: line_num },
+                    confidence: 0.5,
+                    reason: "空間検索結果".to_string(),
+                });
+            }
+            Statement::BeaconBroadcast { .. } | Statement::Notify { .. } | Statement::TokuAccrue { .. } => {
+                // Eeyo用の空間ステートメント（型推論不要）
             }
         }
     }
@@ -242,6 +267,65 @@ impl TypeInferencer {
                 0.5,
                 format!("Assigned from variable '{}' (type unknown)", name),
             ),
+            // Eeyo: 空間・時間型（次元解析対応）
+            Expr::Distance { value: _, unit } => (
+                InferredType::Distance { unit: unit.clone() },
+                1.0,
+                format!("Distance literal with unit '{}'", unit),
+            ),
+            Expr::Duration { value: _, unit } => (
+                InferredType::Duration { unit: unit.clone() },
+                1.0,
+                format!("Duration literal with unit '{}'", unit),
+            ),
+        }
+    }
+
+    /// 次元解析: 2つの型が演算可能かチェック
+    pub fn check_dimension_compatibility(left: &InferredType, right: &InferredType) -> Result<InferredType, String> {
+        match (left, right) {
+            // 同じ型同士は演算可能
+            (InferredType::Number, InferredType::Number) => Ok(InferredType::Number),
+            (InferredType::String, InferredType::String) => Ok(InferredType::String),
+            
+            // 距離同士は演算可能（単位変換が必要な場合あり）
+            (InferredType::Distance { unit: u1 }, InferredType::Distance { unit: u2 }) => {
+                if u1 == u2 {
+                    Ok(InferredType::Distance { unit: u1.clone() })
+                } else {
+                    Err(format!("次元エラー: 距離の単位が不一致 ({} vs {})", u1, u2))
+                }
+            }
+            
+            // 時間同士は演算可能
+            (InferredType::Duration { unit: u1 }, InferredType::Duration { unit: u2 }) => {
+                if u1 == u2 {
+                    Ok(InferredType::Duration { unit: u1.clone() })
+                } else {
+                    Err(format!("次元エラー: 時間の単位が不一致 ({} vs {})", u1, u2))
+                }
+            }
+            
+            // 距離と数値の乗除は可能（スケーリング）
+            (InferredType::Distance { unit }, InferredType::Number) |
+            (InferredType::Number, InferredType::Distance { unit }) => {
+                Ok(InferredType::Distance { unit: unit.clone() })
+            }
+            
+            // 時間と数値の乗除は可能（スケーリング）
+            (InferredType::Duration { unit }, InferredType::Number) |
+            (InferredType::Number, InferredType::Duration { unit }) => {
+                Ok(InferredType::Duration { unit: unit.clone() })
+            }
+            
+            // 距離と時間の混合は禁止（物理的に無意味）
+            (InferredType::Distance { .. }, InferredType::Duration { .. }) |
+            (InferredType::Duration { .. }, InferredType::Distance { .. }) => {
+                Err("次元エラー: 距離と時間は直接演算できません".to_string())
+            }
+            
+            // その他は不明
+            _ => Ok(InferredType::Unknown),
         }
     }
 }
@@ -303,5 +387,42 @@ mod tests {
         assert_eq!(result.variables.len(), 1);
         assert_eq!(result.variables[0].lifetime.start, 1);
         assert_eq!(result.variables[0].lifetime.end, 3);
+    }
+
+    // === Eeyo: 次元解析テスト (Phase 13) ===
+
+    #[test]
+    fn test_dimension_distance_plus_distance() {
+        let left = InferredType::Distance { unit: "m".to_string() };
+        let right = InferredType::Distance { unit: "m".to_string() };
+        let result = TypeInferencer::check_dimension_compatibility(&left, &right);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dimension_distance_plus_duration_error() {
+        let left = InferredType::Distance { unit: "m".to_string() };
+        let right = InferredType::Duration { unit: "分".to_string() };
+        let result = TypeInferencer::check_dimension_compatibility(&left, &right);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("次元エラー"));
+    }
+
+    #[test]
+    fn test_dimension_distance_unit_mismatch() {
+        let left = InferredType::Distance { unit: "m".to_string() };
+        let right = InferredType::Distance { unit: "km".to_string() };
+        let result = TypeInferencer::check_dimension_compatibility(&left, &right);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("単位が不一致"));
+    }
+
+    #[test]
+    fn test_dimension_distance_times_number() {
+        let left = InferredType::Distance { unit: "m".to_string() };
+        let right = InferredType::Number;
+        let result = TypeInferencer::check_dimension_compatibility(&left, &right);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), InferredType::Distance { unit: "m".to_string() });
     }
 }

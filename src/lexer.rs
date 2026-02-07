@@ -77,6 +77,8 @@ pub enum Token {
     // === Phase 11: Motion, State & Advanced Shaders ===
     /// 秒 / Seconds
     KeywordSeconds,
+    /// 後 / After (time)
+    KeywordAfter,
     /// かけて / Over (time)
     KeywordOver,
     /// 深くする / Deepen (Shadow)
@@ -92,6 +94,38 @@ pub enum Token {
     /// 動かしたとき / Drag
     KeywordDrag,
     
+    // === Eeyo: 空間・時間型 (Phase 13) ===
+    /// 距離リテラル (10m, 5km)
+    Distance { value: f64, unit: String },
+    /// 時間リテラル (5分, 3秒, 1時間)
+    Duration { value: f64, unit: String },
+    
+    // === Eeyo: 空間検索キーワード ===
+    /// より近い
+    KeywordNearer,
+    /// より遠い
+    KeywordFarther,
+    /// 探す
+    KeywordFind,
+    /// 暇 / IDLE
+    KeywordIdle,
+    /// 発信する
+    KeywordBroadcast,
+    /// 通知する
+    KeywordNotify,
+    /// 人 (空間検索の対象)
+    KeywordPerson,
+    /// で (条件接続)
+    ParticleDe,
+    /// が (主格)
+    ParticleGa,
+    
+    // === Eeyo: 信頼スコア ===
+    /// 徳
+    KeywordToku,
+    /// 加算する (徳スコア専用動詞)
+    KeywordAccrue,
+    
     /// 改行
     Newline,
     /// ファイル終端
@@ -101,7 +135,9 @@ pub enum Token {
 /// 既知の日本語動詞リスト
 const KNOWN_JP_VERBS: &[&str] = &[
     "足す", "引く", "掛ける", "割る", "表示する", "繰り返す",
-    "要約する", "翻訳する", "読み込む",  // AI verbs & Asset Load
+    "要約する", "翻訳する", "読み込む", "つなぐ", // AI verbs & Asset Load & UI
+    // Eeyo: 空間・通信動詞
+    "探す", "発信する", "通知する", "加算する",
 ];
 
 /// 既知の英語動詞リスト
@@ -162,6 +198,7 @@ const JAPANESE_KEYWORDS: &[(&str, fn() -> Token)] = &[
     
     // Phase 11
     ("秒", || Token::KeywordSeconds),
+    ("後", || Token::KeywordAfter),
     ("かけて", || Token::KeywordOver),
     ("深くする", || Token::KeywordDeepen),
     ("にする", || Token::KeywordChange),
@@ -170,6 +207,15 @@ const JAPANESE_KEYWORDS: &[(&str, fn() -> Token)] = &[
     ("上", || Token::KeywordAbove),
     ("あるとき", || Token::KeywordWhen),
     ("動かしたとき", || Token::KeywordDrag),
+    
+    // Eeyo: 空間検索キーワード (Phase 13)
+    ("より近い", || Token::KeywordNearer),
+    ("より遠い", || Token::KeywordFarther),
+    ("暇", || Token::KeywordIdle),
+    ("人", || Token::KeywordPerson),
+    ("徳", || Token::KeywordToku),
+    ("で", || Token::ParticleDe),
+    ("が", || Token::ParticleGa),
 ];
 
 pub struct Lexer {
@@ -221,7 +267,37 @@ impl Lexer {
                 break;
             }
         }
-        Token::Number(num_str.parse().unwrap_or(0.0))
+        let value = num_str.parse().unwrap_or(0.0);
+        
+        // Eeyo: 距離・時間リテラルの検出
+        let remaining: String = self.input[self.pos..].iter().collect();
+        
+        // 距離単位: m, km
+        if remaining.starts_with("km") {
+            self.advance_by(2);
+            return Token::Distance { value, unit: "km".to_string() };
+        }
+        if remaining.starts_with("m") && !remaining.starts_with("mm") {
+            self.advance_by(1);
+            return Token::Distance { value, unit: "m".to_string() };
+        }
+        
+        // 時間単位: 分, 秒, 時間 (日本語)
+        if remaining.starts_with("時間") {
+            self.advance_by(2);
+            return Token::Duration { value, unit: "時間".to_string() };
+        }
+        if remaining.starts_with("分後") {
+            self.advance_by(2);
+            return Token::Duration { value, unit: "分後".to_string() };
+        }
+        if remaining.starts_with("分") {
+            self.advance_by(1);
+            return Token::Duration { value, unit: "分".to_string() };
+        }
+        // Note: 秒 is handled by KeywordSeconds for animation syntax compatibility
+        
+        Token::Number(value)
     }
 
     fn read_string(&mut self) -> Token {
@@ -243,6 +319,12 @@ impl Lexer {
         while let Some(c) = self.current() {
             if c.is_alphanumeric() || c == '_' || is_japanese_char(c) {
                 let remaining: String = self.input[self.pos..].iter().collect();
+                
+                // 比較キーワードチェック (より大きい, より小さい)
+                // These start with より which is not a particle, so check early
+                if remaining.starts_with("より大きい") || remaining.starts_with("より小さい") {
+                    break;
+                }
                 
                 // 助詞チェック
                 if remaining.starts_with("は") || remaining.starts_with("に") 
@@ -373,7 +455,23 @@ impl Lexer {
                         continue;
                     }
 
-                    // 日本語助詞チェック
+                    // 日本語キーワードチェック (MUST come before particle check!)
+                    // This ensures ならば is matched before な is matched as a particle
+                    let mut matched_kw = false;
+                    for (kw, token_fn) in JAPANESE_KEYWORDS {
+                        let kw_len = kw.chars().count();
+                        if self.peek_str(kw_len) == *kw {
+                            tokens.push(token_fn());
+                            self.advance_by(kw_len);
+                            matched_kw = true;
+                            break;
+                        }
+                    }
+                    if matched_kw {
+                        continue;
+                    }
+
+                    // 日本語助詞チェック (after keyword check)
                     if self.peek_str(1) == "は" {
                         tokens.push(Token::ParticleWa);
                         self.advance();
@@ -402,21 +500,6 @@ impl Lexer {
                     if self.peek_str(1) == "の" {
                         tokens.push(Token::ParticleNo);
                         self.advance();
-                        continue;
-                    }
-
-                    // 日本語キーワードチェック
-                    let mut matched_kw = false;
-                    for (kw, token_fn) in JAPANESE_KEYWORDS {
-                        let kw_len = kw.chars().count();
-                        if self.peek_str(kw_len) == *kw {
-                            tokens.push(token_fn());
-                            self.advance_by(kw_len);
-                            matched_kw = true;
-                            break;
-                        }
-                    }
-                    if matched_kw {
                         continue;
                     }
 
@@ -568,5 +651,38 @@ mod tests {
         assert_eq!(tokens[0], Token::Number(10.0));
         assert_eq!(tokens[1], Token::KeywordTimes);
         assert_eq!(tokens[2], Token::Verb("繰り返す".to_string()));
+    }
+
+    // === Eeyo: 空間・時間型テスト (Phase 13) ===
+
+    #[test]
+    fn test_distance_literal_meters() {
+        let mut lexer = Lexer::new("10m");
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens[0], Token::Distance { value: 10.0, unit: "m".to_string() });
+    }
+
+    #[test]
+    fn test_distance_literal_kilometers() {
+        let mut lexer = Lexer::new("5km");
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens[0], Token::Distance { value: 5.0, unit: "km".to_string() });
+    }
+
+    #[test]
+    fn test_duration_literal_minutes() {
+        let mut lexer = Lexer::new("5分後");
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens[0], Token::Duration { value: 5.0, unit: "分後".to_string() });
+    }
+
+    #[test]
+    fn test_spatial_search_keywords() {
+        let mut lexer = Lexer::new("10m より近い 人 で 状態 が 暇 な 人 を 探す");
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens[0], Token::Distance { value: 10.0, unit: "m".to_string() });
+        assert_eq!(tokens[1], Token::KeywordNearer);  // より近い
+        assert_eq!(tokens[2], Token::KeywordPerson);  // 人
+        assert_eq!(tokens[3], Token::ParticleDe);     // で
     }
 }

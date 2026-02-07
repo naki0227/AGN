@@ -15,6 +15,8 @@ mod ai_runtime;
 mod web_generator;
 mod native_window;
 mod graphics;
+// Eeyo: P2P通信層
+mod p2p;
 
 use std::env;
 use std::fs;

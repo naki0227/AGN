@@ -182,8 +182,11 @@ wasm-bindgen = "0.2"
     fn transpile_expr_value(&self, expr: &Expr) -> String {
         match expr {
             Expr::Number(n) => format!("{:.1}", n),
-            Expr::String(s) => format!("\"{}\"", s), // already quoted? Parser Expr::String separates quotes? Lexer removed quotes. So we add quotes.
+            Expr::String(s) => format!("\"{}\"", s),
             Expr::Variable(name) => name.clone(),
+            // Eeyo: 空間・時間リテラル
+            Expr::Distance { value, unit } => format!("\"{:.1}{}\"", value, unit),
+            Expr::Duration { value, unit } => format!("\"{:.1}{}\"", value, unit),
         }
     }
 

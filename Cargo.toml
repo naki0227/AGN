@@ -5,10 +5,9 @@ edition = "2021"
 description = "Antigravity-Native: A next-generation language with Japanese native grammar"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.11", features = ["json"] }
+# reqwest and tokio moved to target specific sections
 winit = "0.29"
 wgpu = "0.19"
 pollster = "0.3"
@@ -19,3 +18,39 @@ glyphon = "0.5"
 taffy = "0.3"
 image = "0.24"
 bytemuck = { version = "1.14", features = ["derive"] }
+web-time = "1.1"
+# Eeyo: P2P通信層
+once_cell = "1.19"
+rand = "0.8.5"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+console_log = "1.0"
+lazy_static = "1.4"
+js-sys = "0.3"
+web-time = "1.1"
+getrandom = { version = "0.2", features = ["js"] }
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Window",
+    "Element",
+    "HtmlCanvasElement",
+    "Headers",
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+    "console",
+    "Location"
+] }
+tokio = { version = "1", features = ["sync", "macros", "rt"] }
+reqwest = { version = "0.11", default-features = false, features = ["json"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.11", features = ["json"] }

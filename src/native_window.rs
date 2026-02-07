@@ -14,8 +14,9 @@ pub fn run_native_window(rx: Receiver<RuntimeMessage>, symbol_table: Arc<Mutex<S
         .build(&event_loop)
         .unwrap();
 
+    let window = Arc::new(window);
     // Initialize wgpu State
-    let mut state = pollster::block_on(State::new(&window));
+    let mut state = pollster::block_on(State::new(window.clone()));
 
     println!("[Native] Window started with wgpu backend.");
 

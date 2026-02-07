@@ -96,10 +96,13 @@ impl MemoryManager {
         let mut stats = MemoryStats::default();
         
         for alloc in self.allocations.values() {
-            match alloc.var_type {
+            match &alloc.var_type {
                 InferredType::Number => stats.stack_allocations += 1,
                 InferredType::String => stats.heap_allocations += 1,
                 InferredType::Unknown => stats.unknown += 1,
+                // Eeyo: 空間・時間型はスタック割当
+                InferredType::Distance { .. } => stats.stack_allocations += 1,
+                InferredType::Duration { .. } => stats.stack_allocations += 1,
             }
         }
         

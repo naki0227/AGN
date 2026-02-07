@@ -6,8 +6,11 @@ use crate::symbol_table::{SymbolTable, Value};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::mpsc::Sender;
+use web_time::{Duration, Instant};
 
 use crate::graphics::animation::Animation;
+// Eeyo: P2P通信層
+use crate::p2p::{agn_spatial_search, agn_broadcast_beacon, agn_notify_peer};
 
 #[derive(Debug, Clone)]
 pub enum RuntimeMessage {
@@ -20,9 +23,23 @@ pub enum RuntimeMessage {
 pub static SCREEN_CHANNEL: StdMutex<Option<Sender<RuntimeMessage>>> = StdMutex::new(None);
 use tokio::sync::Mutex;
 
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_async<F>(future: F)
+where F: std::future::Future<Output = ()> + Send + 'static {
+    tokio::spawn(future);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn spawn_async<F>(future: F)
+where F: std::future::Future<Output = ()> + 'static {
+    wasm_bindgen_futures::spawn_local(future);
+}
+
+#[derive(Clone)]
 pub struct Interpreter {
-    symbol_table: Arc<StdMutex<SymbolTable>>,
-    context_stack: Arc<StdMutex<Vec<String>>>,
+    pub symbol_table: Arc<StdMutex<SymbolTable>>,
+    pub context_stack: Arc<StdMutex<Vec<String>>>,
+    pub event_handlers: Arc<StdMutex<std::collections::HashMap<(String, String), Vec<Statement>>>>,
 }
 
  impl Interpreter {
@@ -30,6 +47,7 @@ pub struct Interpreter {
         Self {
             symbol_table: Arc::new(StdMutex::new(SymbolTable::new())),
             context_stack: Arc::new(StdMutex::new(Vec::new())),
+            event_handlers: Arc::new(StdMutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -37,6 +55,7 @@ pub struct Interpreter {
         Self {
             symbol_table,
             context_stack: Arc::new(StdMutex::new(Vec::new())),
+            event_handlers: Arc::new(StdMutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -47,6 +66,13 @@ pub struct Interpreter {
             Expr::Variable(name) => {
                 let table = self.symbol_table.lock().unwrap();
                 table.get_value(name)
+            }
+            // Eeyo: 空間・時間型
+            Expr::Distance { value, unit } => {
+                Value::String(format!("{}{}", value, unit))
+            }
+            Expr::Duration { value, unit } => {
+                Value::String(format!("{}{}", value, unit))
             }
         }
     }
@@ -78,6 +104,12 @@ pub struct Interpreter {
                     _ => false,
                 }
             }
+            // Eeyo: 空間条件（後方互換性のためにプレースホルダー）
+            Condition::Nearer(_) | Condition::Farther(_) => {
+                // TODO: P2Pレイヤーで実装予定
+                log::warn!("[空間条件] Nearer/FartherはP2Pレイヤーで実装予定");
+                false
+            }
         }
     }
 
@@ -85,8 +117,8 @@ pub struct Interpreter {
         self.execute_statements(&program.statements).await;
     }
 
-    async fn execute_statements(&self, statements: &[Statement]) {
-        let mut handles = Vec::new();
+    pub async fn execute_statements(&self, statements: &[Statement]) {
+        // let mut handles = Vec::new();
 
         for stmt in statements {
             match stmt {
@@ -219,12 +251,23 @@ pub struct Interpreter {
                 }
                 Statement::BinaryOp { target, operand, verb } => {
                     let op_val = self.eval_expr(operand).await;
+                    
+                    // Handle "Screen" Display (e.g. "MainButton を 画面 に 表示する")
+                    if (target == "Screen" || target == "Screen.Center") && verb == "表示する" {
+                         log::info!("[Output] {}", op_val);
+                         if let Ok(guard) = SCREEN_CHANNEL.lock() {
+                            if let Some(tx) = &*guard {
+                                let _ = tx.send(RuntimeMessage::String(op_val.to_string()));
+                            }
+                         }
+                         continue;
+                    }
+
                     let mut table = self.symbol_table.lock().unwrap();
                     
+                    // Numeric Operations
                     if let Some(Value::Number(current)) = table.lookup(target).cloned() {
                         if let Value::Number(op_num) = op_val {
-                             // ...
-                             // Simplified just to match lock() call
                              let result = match verb.as_str() {
                                 "足す" => current + op_num,
                                 "引く" => current - op_num,
@@ -233,6 +276,19 @@ pub struct Interpreter {
                                 _ => current,
                              };
                              table.update(target, Value::Number(result));
+                        }
+                    }
+                    // Component Operations (e.g. "つなぐ")
+                    // Target "Card", Operand "Hello", Verb "つなぐ"
+                    else if let Some(Value::Component { .. }) = table.lookup(target).cloned() {
+                        if verb == "つなぐ" {
+                            // Append child
+                            // Need to mutate the component in the table
+                            let parent_val = table.get_value(target);
+                            if let Value::Component { style, ty, label, mut children, layout } = parent_val {
+                                children.push(op_val.clone());
+                                table.update(target, Value::Component { style, ty, label, children, layout });
+                            }
                         }
                     }
                 }
@@ -244,10 +300,12 @@ pub struct Interpreter {
                     let val = self.eval_expr(operand).await;
                     let verb = verb.clone();
                     
-                    let handle = tokio::spawn(async move {
+                    let handle = spawn_async(async move {
                         execute_verb_static(&verb, val).await;
                     });
-                    handles.push(handle);
+                    // handles.push(handle); // spawn_async returns () on wasm?
+                    // Actually, we don't need to track handles for basic async op unless we join.
+                    // For now, fire and forget.
                 }
                 Statement::IfStatement { condition, then_block, else_block } => {
                     let cond_result = self.eval_condition(condition).await;
@@ -266,7 +324,7 @@ pub struct Interpreter {
                         }
                     }
                 }
-                Statement::AiOp { result, input, verb, options: _ } => {
+                Statement::AiOp { result, input, verb, options } => {
                     let input_val = self.eval_expr(input).await;
                     let input_str = match input_val {
                         Value::String(s) => s,
@@ -274,18 +332,30 @@ pub struct Interpreter {
                         _ => String::new(),
                     };
                     
+                    let option_val = if let Some(opt_expr) = options {
+                        let val = self.eval_expr(opt_expr).await;
+                        Some(val.to_string())
+                    } else {
+                        None
+                    };
+                    
                     let runtime = crate::ai_runtime::AiRuntime::new();
-                    match runtime.execute_verb(verb, &input_str).await {
+                    match runtime.execute_verb(verb, &input_str, option_val).await {
                         Ok(ai_result) => {
+                            log::info!("[AI] {} result: {}", verb, &ai_result);
                             let mut table = self.symbol_table.lock().unwrap();
                             table.register(result, Value::String(ai_result));
                         }
-                        Err(e) => eprintln!("AI Error: {}", e),
+                        Err(e) => {
+                            log::error!("[AI Error] {}: {}", verb, e);
+                            let mut table = self.symbol_table.lock().unwrap();
+                            table.register(result, Value::String(format!("[AI Error: {}]", e)));
+                        }
                     }
                 }
                 Statement::ScreenOp { operand } => {
                     let val = self.eval_expr(operand).await;
-                    println!("[Screen] {}", val);
+                    log::info!("[Output] {}", val);
                     
                     if let Ok(guard) = SCREEN_CHANNEL.lock() {
                         if let Some(tx) = &*guard {
@@ -293,102 +363,229 @@ pub struct Interpreter {
                         }
                     }
                 }
-                Statement::EventHandler { target, event, body } => {
-                    // event is passed from parser ("hover", "click", "drag", etc.)
+                Statement::DelayStatement { duration, body } => {
+                    let duration_val = self.eval_expr(duration).await;
+                    if let Value::Number(secs) = duration_val {
+                        // Async delay
+                        let sleep_ms = (secs * 1000.0) as u64;
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            // Use setTimeout via Promise in Wasm?
+                            // Or gloo_timers? 
+                            // Since we are async, we can use a helper.
+                            // But wait, `std::thread::sleep` blocks. We need async sleep.
+                            // `web_time` doesn't provide async sleep directly?
+                            // We can use a simple JS promise wrapper or `gloo_timers::future::TimeoutFuture`.
+                            // For now, let's use a simple spin or assumption that `tokio` isn't available in minimal wasm.
+                            // Actually, I can use a helper function for async sleep.
+                            crate::utils::sleep(sleep_ms).await;
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                             tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)).await;
+                        }
+                        
+                        Box::pin(self.execute_statements(body)).await;
+                    }
+                }
+                Statement::AnimateStatement { duration, target, property, value } => {
+                    let duration_val = self.eval_expr(duration).await;
+                    let target_val = self.eval_expr(value).await;
                     
-                    // Resolve "self" to current context target
+                    let duration_secs = match duration_val {
+                        Value::Number(n) => n,
+                        _ => 0.0,
+                    };
+                    
+                    // Construct RuntimeMessage for Animation
+                    // Frontend will handle the transition
+                    let msg = format!("[Animation] Target: {}, Prop: {}, Value: {}, Duration: {}s", target, property, target_val, duration_secs);
+                    log::info!("{}", msg);
+                    
+                    if let Ok(guard) = SCREEN_CHANNEL.lock() {
+                        if let Some(tx) = &*guard {
+                            // Send custom message or overload String/Event?
+                            // Ideally extend RuntimeMessage. For now, send formatted string?
+                            // Or better: Add RuntimeMessage::Animate 
+                            // But RuntimeMessage definition is in lib.rs?
+                            // Let's assume we can add it or repurpose String with visual cue.
+                            // Actually, let's add Animate variant to RuntimeMessage in lib.rs later.
+                            // For this step, I'll send a formatted string that page.tsx can parse.
+                            // "[Animation] {json}"
+                            let json = format!(r#"{{ "target": "{}", "property": "{}", "value": "{}", "duration": {} }}"#, 
+                                target, property, target_val, duration_secs);
+                            let _ = tx.send(RuntimeMessage::String(format!("[Animation] {}", json)));
+                        }
+                    }
+                }
+                Statement::EventHandler { target, event, body } => {
+                    // Resolve "self" or target
                     let stack = self.context_stack.lock().unwrap();
-                    // If target is "self", use stack top. Else use target name?
-                    let target_id = if target == "self" {
+                    let target_id = if target == "MainButton" {
+                        // Hack for demo: explicit target
+                        "MainButton".to_string()
+                    } else if target == "self" || target == "マウス" { 
+                        // If "mouse", target is likely inferred? 
+                        // In draft: "マウス が 上 に あるとき" where?
+                        // "カード の 上 に" or implicit context?
+                        // Assuming context stack has target.
                         stack.last().cloned().unwrap_or("Screen".to_string())
                     } else {
                         target.clone()
                     };
-                    drop(stack); // unlock
+                    drop(stack);
 
-                    // Extract animations from body
-                    let mut animations = Vec::new();
-                    for stmt in body {
-                        if let Statement::Animate { duration, property, target_value } = stmt {
-                             // Resolve value
-                            let target_val_f32 = match target_value {
-                                Expr::Number(n) => *n as f32,
-                                Expr::String(s) if s == "deepen" => 20.0,
-                                Expr::String(s) if s == "水色" => 1.0, 
-                                _ => 0.0,
-                            };
-                            
-                            animations.push(Animation {
-                                target_id: target_id.clone(),
-                                property: property.clone(),
-                                start_value: 0.0, // Managed by controller
-                                end_value: target_val_f32,
-                                start_time: std::time::Instant::now(), // Placeholder
-                                duration: std::time::Duration::from_secs_f64(*duration),
-                                easing: crate::graphics::animation::Easing::EaseInOut,
-                            });
-                        }
+                    // 1. Register handler in Interpreter
+                    {
+                        let mut handlers = self.event_handlers.lock().unwrap();
+                        handlers.insert((target_id.clone(), event.clone()), body.clone());
                     }
 
+                    // 2. Send RegisterEvent to Frontend
+                    // Frontend needs to attach listener to HTML element `target_id`.
+                    // And extract animations for immediate feedback if purely visual?
+                    // Actually, if we use `handle_event` re-entry, we don't need to extract animations here.
+                    // The Backend will execute `AnimateStatement`.
+                    // But for "hover" effects (CSS), Frontend handling is smoother?
+                    // Draft says: "0.3秒 かけて 影 を 深くする".
+                    // If Backend handles it, roundtrip latency might be visible?
+                    // For "Clicker", click -> score update -> render is fine.
+                    // For "Hover", CSS is better.
+                    // But syntax is general.
+                    // Let's stick to Backend execution for logic correctness (Score update).
+                    // For pure animations, we might want optimization, but let's do Backend first.
+                    
                     if let Ok(guard) = SCREEN_CHANNEL.lock() {
                         if let Some(tx) = &*guard {
-                            let _ = tx.send(RuntimeMessage::RegisterEvent(target_id, event.clone(), animations));
+                            // We don't send animations here anymore, just the registration order.
+                            let _ = tx.send(RuntimeMessage::RegisterEvent(target_id.clone(), event.clone(), Vec::new()));
+                        }
+                    }
+                    
+                    // Log for Web Frontend Interception
+                    log::info!("[RegisterEvent] {} {}", target_id, event);
+                }
+                Statement::AnimateStatement { duration, target, property, value } => {
+                    let duration_val = self.eval_expr(duration).await;
+                    let target_val_f32 = match self.eval_expr(value).await {
+                         Value::Number(n) => n,
+                         Value::String(s) if s == "deepen" => 20.0,
+                         Value::String(s) if s == "blue" => 1.0, 
+                         _ => 0.0, // Should handle colors etc properly
+                    };
+                    
+                    let duration_secs = match duration_val {
+                        Value::Number(n) => n,
+                        _ => 0.0,
+                    };
+
+                    // For now, construct formatted string for frontend
+                    log::info!("[Animation] Target: {}, Prop: {}, Value: {}, Duration: {}s", target, property, target_val_f32, duration_secs);
+
+                     if let Ok(guard) = SCREEN_CHANNEL.lock() {
+                        if let Some(tx) = &*guard {
+                            let json = format!(r#"{{ "target": "{}", "property": "{}", "value": "{}", "duration": {} }}"#, 
+                                target, property, target_val_f32, duration_secs);
+                            let _ = tx.send(RuntimeMessage::String(format!("[Animation] {}", json)));
                         }
                     }
                 }
-                Statement::Animate { duration, property, target_value } => {
-                    // Check if we are in a block? Or just animate the "current target"?
-                    // The syntax is "[Time] かけて [Property] を [Value] にする"
-                    // It doesn't explicitly state the target object if outside a block.
-                    // But usually it's used inside a block or refers to "This/Self".
-                    // Or maybe we should track the "last referenced object"?
-                    // For now, let's assume it applies to the "Root" or "Card" if not specific?
-                    // "カード は ...。 0.3秒かけて..." -> implicit subject?
-                    // Actually, the parser for current demo creates syntax:
-                    // "マウス が 上 に あるとき" (Event Handler)
-                    //    "0.3秒 かけて 影 を 深くする"
-                    // Here, target is implicit (the object having the event handler).
-                    // In `execute_statements`, we don't have implicit 'self' reference passed down easily.
-                    // We might need to store `self_id` in context stack or pass it.
-                    
-                    // Quick fix: Use context stack. If inside a block/handler, top of stack is target.
-                    let stack = self.context_stack.lock().unwrap();
-                    let target_id = stack.last().cloned().unwrap_or("Screen".to_string());
-                    
-                    let target_val_f32 = match target_value {
-                        Expr::Number(n) => *n as f32,
-                        Expr::String(s) if s == "deepen" => 20.0, // Hardcoded logic for "deepen"
-                        Expr::String(s) if s == "水色" => 1.0, // Hack: Color mapping is complex. Float for now.
-                        Expr::Variable(_) => 0.0, // Resolve var?
-                        _ => 0.0,
-                    };
-                    
-                    let anim = Animation {
-                        target_id,
-                        property: property.clone(),
-                        start_value: 0.0, // Needs current value from State? State has it. Controller handles it?
-                                          // Controller needs start value. If passed 0, it jumps.
-                                          // Better to let Controller read current value if start_value is None (or separate flag).
-                                          // For now, pass 0.0 and handle in controller?
-                                          // Let's modify Animation struct to have optional start?
-                        end_value: target_val_f32,
-                        start_time: std::time::Instant::now(), // Will be reset by receiver likely
-                        duration: std::time::Duration::from_secs_f64(*duration),
-                        easing: crate::graphics::animation::Easing::EaseInOut,
-                    };
-                    
-                    if let Ok(guard) = SCREEN_CHANNEL.lock() {
-                        if let Some(tx) = &*guard {
-                            let _ = tx.send(RuntimeMessage::Animate(anim));
+
+                // === Eeyo: 空間・通信ステートメント (Phase 13) ===
+                Statement::SpatialSearch { result, max_distance, filters } => {
+                    // 距離を数値として取得
+                    let distance = match self.eval_expr(max_distance).await {
+                        Value::Number(n) => n,
+                        Value::String(s) => {
+                            // "10m" -> 10.0
+                            s.trim_end_matches(char::is_alphabetic)
+                                .parse::<f64>()
+                                .unwrap_or(10.0)
                         }
+                        _ => 10.0,
+                    };
+                    
+                    // フィルタを変換
+                    let filter_vec: Vec<(String, String)> = filters.iter()
+                        .map(|f| (f.field.clone(), format!("{:?}", f.condition)))
+                        .collect();
+                    
+                    log::info!("[Eeyo] 空間検索実行: distance={}m, filters={}", distance, filter_vec.len());
+                    
+                    // P2P APIを呼び出し
+                    let peers = agn_spatial_search(distance, &filter_vec).await;
+                    
+                    // 結果を文字列として保存
+                    let result_str = if peers.is_empty() {
+                        "[]".to_string()
+                    } else {
+                        format!("[{} peers found]", peers.len())
+                    };
+                    
+                    let mut table = self.symbol_table.lock().unwrap();
+                    table.register(result, Value::String(result_str));
+                }
+                Statement::BeaconBroadcast { beacon_type, duration, payload: _ } => {
+                    // 発信時間を取得
+                    let duration_sec = if let Some(dur_expr) = duration {
+                        match self.eval_expr(dur_expr).await {
+                            Value::Number(n) => Some(n as u64),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    
+                    log::info!("[Eeyo] ビーコン発信: type={}, duration={:?}s", beacon_type, duration_sec);
+                    
+                    // P2P APIを呼び出し
+                    if let Err(e) = agn_broadcast_beacon(beacon_type, duration_sec).await {
+                        log::error!("[Eeyo] ビーコン発信失敗: {}", e);
                     }
+                }
+                Statement::Notify { target, message } => {
+                    let target_val = self.eval_expr(target).await;
+                    let message_val = self.eval_expr(message).await;
+                    
+                    let peer_id = match target_val {
+                        Value::String(s) => s,
+                        v => format!("{}", v),
+                    };
+                    let msg = match message_val {
+                        Value::String(s) => s,
+                        v => format!("{}", v),
+                    };
+                    
+                    log::info!("[Eeyo] 通知送信: peer={}, message={}", peer_id, msg);
+                    
+                    // P2P APIを呼び出し
+                    if let Err(e) = agn_notify_peer(&peer_id, &msg).await {
+                        log::error!("[Eeyo] 通知失敗: {}", e);
+                    }
+                }
+                Statement::TokuAccrue { target, amount } => {
+                    let target_val = self.eval_expr(target).await;
+                    let amount_val = self.eval_expr(amount).await;
+                    
+                    let user_id = match target_val {
+                        Value::String(s) => s,
+                        v => format!("{}", v),
+                    };
+                    let toku_amount = match amount_val {
+                        Value::Number(n) => n as u32,
+                        Value::String(s) => s.parse::<u32>().unwrap_or(10),
+                        _ => 10,
+                    };
+                    
+                    log::info!("[Eeyo] 徳加算: user={}, amount={}", user_id, toku_amount);
+                    
+                    // TokuManager APIを呼び出し
+                    crate::p2p::agn_add_toku(&user_id, toku_amount);
                 }
             }
         }
-
-        for handle in handles {
-            let _ = handle.await;
-        }
+        //     let _ = handle.await;
+        // }
     }
 
     async fn execute_verb(&self, verb: &str, value: Value) {
@@ -405,7 +602,7 @@ impl Default for Interpreter {
 async fn execute_verb_static(verb: &str, value: Value) {
     match verb {
         "表示する" => {
-            println!("{}", value);
+            log::info!("[Output] {}", value);
             if let Ok(guard) = SCREEN_CHANNEL.lock() {
                 if let Some(tx) = &*guard {
                     let _ = tx.send(RuntimeMessage::String(value.to_string()));
@@ -421,9 +618,9 @@ async fn execute_verb_static(verb: &str, value: Value) {
             };
             
             let runtime = crate::ai_runtime::AiRuntime::new();
-            match runtime.execute_verb(verb, &input).await {
-                Ok(result) => println!("{}", result),
-                Err(e) => eprintln!("AI Error: {}", e),
+            match runtime.execute_verb(verb, &input, None).await {
+                Ok(result) => log::info!("[AI] Result: {}", result),
+                Err(e) => log::error!("[AI Error] {}", e),
             }
         }
         _ => {
