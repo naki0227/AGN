@@ -1,34 +1,22 @@
 //! AGN - Antigravity-Native Language
 //! 日本語ネイティブ文法の次世代プログラミング言語
 
-mod lexer;
-mod parser;
-mod symbol_table;
-mod interpreter;
-mod normalizer;
-mod type_inferencer;
-mod ai_analyzer;
-mod codegen;
-mod compiler;
-mod memory;
-mod ai_runtime;
-mod web_generator;
-mod native_window;
-mod graphics;
-// Eeyo: P2P通信層
-mod p2p;
+// Modules are now imported from the library crate `agn`
 
 use std::env;
 use std::fs;
 use std::time::Instant;
 
-use lexer::Lexer;
-use parser::Parser;
-use interpreter::Interpreter;
-use normalizer::Normalizer;
-use type_inferencer::TypeInferencer;
-use compiler::Compiler;
-use memory::MemoryManager;
+use agn::lexer::Lexer;
+use agn::parser::Parser;
+use agn::interpreter::Interpreter;
+use agn::normalizer::Normalizer;
+use agn::type_inferencer::TypeInferencer;
+use agn::compiler::{self, Compiler};
+use agn::memory::MemoryManager;
+use agn::interpreter;
+use agn::symbol_table;
+use agn::native_window;
 
 fn print_usage() {
     println!("Usage: agn [OPTIONS] [FILE]");
@@ -157,7 +145,7 @@ X を 並列で 表示する
                     match result.run() {
                         Ok(output) => {
                             print!("{}", output);
-                            let native_duration = native_start.elapsed();
+                            let _native_duration = native_start.elapsed();
                             print!("{}", output);
                             let native_duration = native_start.elapsed();
                             

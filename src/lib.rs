@@ -11,11 +11,13 @@ pub mod compiler;
 pub mod memory;
 pub mod ai_runtime;
 pub mod web_generator;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod native_window;
 pub mod graphics;
 pub mod utils;
 // Eeyo: P2P通信層
 pub mod p2p;
+pub mod bridge;
 
 
 #[cfg(target_arch = "wasm32")]
@@ -63,9 +65,11 @@ pub async fn run_script(source: String, _canvas_id: Option<String>) -> Result<()
     log::info!("[AGN] Parsed {} statements. Executing...", program.statements.len());
 
     // 3. Execute (Interpreter - Console Output Only)
-    // Create new interpreter or use global?
-    // For now, reset global.
-    let interpreter = crate::interpreter::Interpreter::new();
+    // Create bridges
+    use crate::bridge::std_bridge::{StdP2PBridge, StdUIManager};
+    let p2p = Arc::new(StdP2PBridge);
+    let ui = Arc::new(StdUIManager);
+    let interpreter = crate::interpreter::Interpreter::with_bridges(p2p, ui);
     
     // Execute main script
     interpreter.execute(&program).await;
@@ -246,6 +250,49 @@ pub fn eeyo_create_beacon_packet(beacon_type: &str, toku_score: u16, user_id: &s
     packet.to_bytes().to_vec()
 }
 
+/// セキュアなビーコンパケットを生成 (Phase 17)
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn eeyo_create_secure_beacon_packet(beacon_type: &str, toku_score: u16) -> Vec<u8> {
+    use crate::p2p::{BeaconType, EeyoSecurePacket, SECURITY_CONTEXT};
+    
+    let bt = match beacon_type {
+        "idle" | "暇" => BeaconType::Idle,
+        "need_help" | "助けて" => BeaconType::NeedHelp,
+        "touring" | "観光中" => BeaconType::Touring,
+        _ => BeaconType::Custom(0x00),
+    };
+    
+    let context = SECURITY_CONTEXT.lock().unwrap();
+    let public_key = context.verifying_key.to_bytes();
+    let signing_key = &context.signing_key;
+    
+    let mut packet = EeyoSecurePacket::new(bt, toku_score, &public_key, signing_key);
+    
+    packet.to_bytes()
+}
+
+/// セキュアなビーコンパケット（バイト列）をパースしてJSONで返す
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn eeyo_parse_secure_packet(packet_bytes: &[u8]) -> Option<String> {
+    use crate::p2p::EeyoSecurePacket;
+    if let Some(packet) = EeyoSecurePacket::from_bytes(packet_bytes) {
+        // [u8; 64] などがSerdeで直接扱いにくいため、手動でJSON化
+        let json = serde_json::json!({
+            "beacon_type": format!("{:?}", packet.beacon_type),
+            "toku_score": packet.toku_score,
+            "nonce": packet.nonce,
+            "timestamp": packet.timestamp,
+            "sender_public_key": hex::encode(packet.sender_public_key),
+            "signature": hex::encode(packet.signature),
+        });
+        Some(json.to_string())
+    } else {
+        None
+    }
+}
+
 // ------------------------------------------------------------
 // 徳フィード (Social Toku Feed) API
 // ------------------------------------------------------------
@@ -256,6 +303,34 @@ pub fn eeyo_create_beacon_packet(beacon_type: &str, toku_score: u16, user_id: &s
 pub fn eeyo_simulate_gossip() -> Result<String, JsValue> {
     let manager = crate::p2p::P2PManager::new();
     let events = manager.simulate_incoming_gossip();
+    
+    // イベントフック: P2Pイベントをインタプリタに通知
+    // Lock and clone interpreter
+    let interpreter_opt = {
+        let guard = GLOBAL_INTERPRETER.lock().unwrap();
+        guard.clone()
+    };
+
+    if let Some(interpreter) = interpreter_opt {
+        for event in &events {
+            let type_str = match event.event_type {
+                crate::p2p::SocialEventType::HelpGiven => "HelpGiven",
+                crate::p2p::SocialEventType::ThankYou => "ThankYou",
+                crate::p2p::SocialEventType::PassedBy => "PassedBy",
+                crate::p2p::SocialEventType::TokuSent { .. } => "TokuSent",
+            };
+            
+            let interpreter = interpreter.clone();
+            let from_id = event.actor_id.clone();
+            let to_id = event.target_id.clone();
+            let type_string = type_str.to_string();
+            
+            // Spawn async task to handle event
+            wasm_bindgen_futures::spawn_local(async move {
+                interpreter.trigger_event(&type_string, &from_id, &to_id).await;
+            });
+        }
+    }
     
     serde_json::to_string(&events)
         .map_err(|e| JsValue::from_str(&format!("JSON変換エラー: {}", e)))
@@ -289,4 +364,28 @@ pub fn eeyo_publish_social_event(
     
     serde_json::to_string(&event)
         .map_err(|e| JsValue::from_str(&format!("JSON変換エラー: {}", e)))
+}
+
+/// 絆情報を取得（JSON形式）
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn eeyo_get_bond(from: &str, to: &str) -> Result<String, JsValue> {
+    let rel = crate::p2p::agn_get_bond(from, to);
+    serde_json::to_string(&rel)
+        .map_err(|e| JsValue::from_str(&format!("JSON変換エラー: {}", e)))
+}
+
+/// 絆を深める
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn eeyo_deepen_bond(from: &str, to: &str, amount: u32) {
+    log::info!("[Eeyo WASM] 絆深化: {} ⇔ {} (+{})", from, to, amount);
+    crate::p2p::agn_deepen_bond(from, to, amount);
+}
+
+/// 絆があるか確認
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn eeyo_has_bond(from: &str, to: &str) -> bool {
+    crate::p2p::agn_has_bond(from, to)
 }

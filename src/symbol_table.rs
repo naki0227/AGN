@@ -18,6 +18,8 @@ pub enum Value {
         children: Vec<Value>,
         layout: Option<String>, // "vertical" or "horizontal"
     },
+    /// 絆 (ユーザー間の関係性)
+    Bond(crate::p2p::Relationship),
     Nil,
 }
 
@@ -47,6 +49,7 @@ impl std::fmt::Display for Value {
                 
                 write!(f, "[{} {} '{}' ({} children)]", style, ty, content, count)
             }
+            Value::Bond(rel) => write!(f, "[Bond Lvl:{}, Str:{}, Help:{}]", rel.level, rel.strength, rel.help_count),
             Value::Nil => write!(f, "nil"),
         }
     }

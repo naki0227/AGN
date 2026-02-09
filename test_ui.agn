@@ -1,6 +1,0 @@
-入力 は "AGNは世界を変える言語です" だ
-summarize 入力
-show 入力 to Screen
-on Button click
-    show 入力 to Screen
-end

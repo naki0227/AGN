@@ -1,0 +1,16 @@
+// クリッカーゲーム - Click Test Demo
+
+// 変数
+Score は 0
+
+// UI
+MainButton は ボタン
+
+// イベント
+MainButton が クリックされたとき {
+    Score を 1 増やす
+    Score を 表示する
+}
+
+// メイン
+MainButton を 表示する

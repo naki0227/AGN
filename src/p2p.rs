@@ -6,9 +6,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use ed25519_dalek::{Signer, Verifier, VerifyingKey, Signature};
+use rand::Rng;
 
 /// ビーコンタイプ（ユーザーの状態を表す）
-#[derive(Debug, Clone, PartialEq, Copy)]
+#[derive(Debug, Clone, PartialEq, Copy, Serialize, Deserialize)]
 pub enum BeaconType {
     /// 助けを求めている
     NeedHelp,
@@ -86,6 +88,211 @@ pub struct EeyoBeaconPacket {
     /// TTL (秒単位、最大255秒)
     pub ttl: u8,
 }
+
+/// セキュアなビーコンパケット (Phase 17)
+/// 
+/// ```text
+/// +--------+--------+--------+--------+--------+--------+--------+--------+
+/// | Magic  | Ver    | Type   | Toku   | Toku   | Nonce  | Nonce  | Nonce  |
+/// | (0xEE) | (0x02) | (1B)   | Hi(1B) | Lo(1B) | [0]    | [1]    | [2]    |
+/// +--------+--------+--------+--------+--------+--------+--------+--------+
+/// | Nonce  | Time   | Time   | Time   | Time   | Time   | Time   | Time   |
+/// | [3]    | [0]    | [1]    | [2]    | [3]    | [4]    | [5]    | [6]    |
+/// +--------+--------+--------+--------+--------+--------+--------+--------+
+/// | Time   | PubKey | ...    | PubKey | Sig    | ...    | Sig    |
+/// | [7]    | (32B)  |        | [31]   | (64B)  |        | [63]   |
+/// +--------+--------+--------+--------+--------+--------+--------+--------+
+/// ```
+/// Total: ~112 bytes
+#[derive(Debug, Clone)]
+pub struct EeyoSecurePacket {
+    /// マジックバイト (0xEE)
+    pub magic: u8,
+    /// プロトコルバージョン (0x02)
+    pub version: u8,
+    /// ビーコンタイプ
+    pub beacon_type: BeaconType,
+    /// 徳スコア
+    pub toku_score: u16,
+    /// ナンス (重複排除用)
+    pub nonce: u32,
+    /// タイムスタンプ (UNIX Epoch ms)
+    pub timestamp: u64,
+    /// 送信者公開鍵 (32 bytes)
+    pub sender_public_key: [u8; 32],
+    /// Ed25519署名 (64 bytes)
+    pub signature: [u8; 64],
+}
+
+impl EeyoSecurePacket {
+    pub const MAGIC: u8 = 0xEE;
+    pub const VERSION: u8 = 0x02;
+    pub const PACKET_SIZE: usize = 113; // 49 (Payload) + 64 (Sig)
+
+    pub fn new(
+        beacon_type: BeaconType,
+        toku_score: u16,
+        public_key: &[u8; 32],
+        secret_key: &ed25519_dalek::SigningKey,
+    ) -> Self {
+        let mut rng = rand::thread_rng();
+        let nonce = rng.gen::<u32>();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let mut packet = Self {
+            magic: Self::MAGIC,
+            version: Self::VERSION,
+            beacon_type,
+            toku_score,
+            nonce,
+            timestamp,
+            sender_public_key: *public_key,
+            signature: [0u8; 64],
+        };
+
+        packet.sign(secret_key);
+        packet
+    }
+
+    /// 署名対象のバイト列を取得
+    fn to_bytes_for_signing(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(48);
+        bytes.push(self.magic);
+        bytes.push(self.version);
+        bytes.push(self.beacon_type.to_byte()); // Corrected from `self.beacon_type as u8`
+        bytes.extend_from_slice(&self.toku_score.to_be_bytes());
+        bytes.extend_from_slice(&self.nonce.to_be_bytes());
+        bytes.extend_from_slice(&self.timestamp.to_be_bytes());
+        bytes.extend_from_slice(&self.sender_public_key);
+        bytes
+    }
+
+    /// 署名を生成して設定
+    pub fn sign(&mut self, secret_key: &ed25519_dalek::SigningKey) {
+        let bytes = self.to_bytes_for_signing();
+        self.signature = secret_key.sign(&bytes).to_bytes();
+    }
+
+    /// 署名とタイムスタンプを検証
+    pub fn verify(&self) -> bool {
+        // 1. Timestamp Check (Allow +/- 30 seconds)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        
+        if self.timestamp > now + 30_000 || self.timestamp < now.saturating_sub(30_000) {
+            // log::warn!("[Security] Timestamp out of range: {} (now: {})", self.timestamp, now); // Commented out as `log` crate is not imported
+            return false;
+        }
+
+        // 2. Signature Check
+        let verifying_key = match VerifyingKey::from_bytes(&self.sender_public_key) {
+            Ok(vk) => vk,
+            Err(_) => return false,
+        };
+        
+        let signature = Signature::from_bytes(&self.signature);
+        let bytes = self.to_bytes_for_signing();
+        
+        verifying_key.verify(&bytes, &signature).is_ok()
+    }
+
+    /// フルパケットをバイト列にシリアライズ
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = self.to_bytes_for_signing();
+        bytes.extend_from_slice(&self.signature);
+        bytes
+    }
+
+    /// バイト列からパケットを復元し、検証を行う
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != Self::PACKET_SIZE {
+            return None;
+        }
+        
+        if bytes[0] != Self::MAGIC || bytes[1] != Self::VERSION {
+            return None;
+        }
+        
+        let beacon_type = BeaconType::from_byte(bytes[2]);
+        let toku_score = u16::from_be_bytes([bytes[3], bytes[4]]);
+        let nonce = u32::from_be_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]);
+        let timestamp = u64::from_be_bytes([
+            bytes[9], bytes[10], bytes[11], bytes[12],
+            bytes[13], bytes[14], bytes[15], bytes[16],
+        ]);
+        
+        let mut sender_public_key = [0u8; 32];
+        sender_public_key.copy_from_slice(&bytes[17..49]);
+        
+        let mut signature = [0u8; 64];
+        signature.copy_from_slice(&bytes[49..113]);
+        
+        let packet = Self {
+            magic: Self::MAGIC,
+            version: Self::VERSION,
+            beacon_type,
+            toku_score,
+            nonce,
+            timestamp,
+            sender_public_key,
+            signature,
+        };
+        
+        if packet.verify() {
+            Some(packet)
+        } else {
+            None
+        }
+    }
+}
+
+/// セキュリティコンテキスト (鍵管理)
+pub struct SecurityContext {
+    pub signing_key: ed25519_dalek::SigningKey,
+    pub verifying_key: ed25519_dalek::VerifyingKey,
+}
+
+impl SecurityContext {
+    /// 新しいキーペアを生成
+    pub fn new() -> Self {
+        use rand::RngCore;
+        let mut key_bytes = [0u8; 32];
+        let mut rng = rand::thread_rng();
+        rng.fill_bytes(&mut key_bytes);
+        
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
+        let verifying_key = signing_key.verifying_key();
+        
+        Self {
+            signing_key,
+            verifying_key,
+        }
+    }
+
+    /// バイト列からキーペアを復元 (永続化用)
+    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(bytes);
+        let verifying_key = signing_key.verifying_key();
+        Self {
+            signing_key,
+            verifying_key,
+        }
+    }
+
+    /// 署名鍵をバイト列として取得 (永続化用)
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.signing_key.to_bytes()
+    }
+}
+
+pub static SECURITY_CONTEXT: once_cell::sync::Lazy<std::sync::Mutex<SecurityContext>> = once_cell::sync::Lazy::new(|| {
+    std::sync::Mutex::new(SecurityContext::new())
+});
 
 impl EeyoBeaconPacket {
     /// パケットサイズ (バイト)
@@ -255,10 +462,83 @@ pub struct TokuEvent {
     pub timestamp: u64,
 }
 
+/// ユーザー間の関係性（絆 / Bond）
+/// 
+/// 「ええよ」における継続的な関係を表現
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Relationship {
+    /// 絆レベル (0 = 初対面, 1+ = 絆あり)
+    pub level: u32,
+    /// 絆の強さ (0-1000) - レベル内での親密度
+    pub strength: u32,
+    /// 初めて出会った日時 (Unix秒)
+    pub first_met: u64,
+    /// 最後の接触（Unix秒）
+    pub last_interaction: u64,
+    /// 助け合い回数
+    pub help_count: u32,
+    /// 関係タグ (「知人」「親友」等)
+    pub tags: Vec<String>,
+}
+
+impl Default for Relationship {
+    fn default() -> Self {
+        Self {
+            level: 0,
+            strength: 0,
+            first_met: 0,
+            last_interaction: 0,
+            help_count: 0,
+            tags: Vec::new(),
+        }
+    }
+}
+
+impl Relationship {
+    /// 新しい絆を作成
+    pub fn new_bond() -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self {
+            level: 1,
+            strength: 10,
+            first_met: now,
+            last_interaction: now,
+            help_count: 0,
+            tags: Vec::new(),
+        }
+    }
+
+    /// 絆を深める (助け合い成功時)
+    pub fn deepen(&mut self, amount: u32) {
+        self.help_count += 1;
+        self.strength = (self.strength + amount).min(1000);
+        self.last_interaction = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        // レベルアップ判定 (strength 100 ごとにレベル+1)
+        let new_level = (self.strength / 100).max(1);
+        if new_level > self.level {
+            self.level = new_level;
+        }
+    }
+
+    /// 絆があるかどうか
+    pub fn has_bond(&self) -> bool {
+        self.level > 0
+    }
+}
+
 /// 徳スコアマネージャ
 pub struct TokuManager {
     /// ユーザーごとの徳スコア
     scores: Arc<Mutex<HashMap<String, u32>>>,
+    /// ユーザー間の関係性 (From -> To)
+    relationships: Arc<Mutex<HashMap<(String, String), Relationship>>>,
     /// イベント履歴
     events: Arc<Mutex<Vec<TokuEvent>>>,
 }
@@ -272,6 +552,7 @@ impl TokuManager {
     pub fn new() -> Self {
         Self {
             scores: Arc::new(Mutex::new(HashMap::new())),
+            relationships: Arc::new(Mutex::new(HashMap::new())),
             events: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -337,6 +618,34 @@ impl TokuManager {
         }
         hash
     }
+
+    /// 関係性を取得
+    pub fn get_relationship(&self, from: &str, to: &str) -> Relationship {
+        let rels = self.relationships.lock().unwrap();
+        rels.get(&(from.to_string(), to.to_string()))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// 関係性を更新（強さを加算）
+    pub fn update_relationship(&self, from: &str, to: &str, delta: i32) {
+        let mut rels = self.relationships.lock().unwrap();
+        let key = (from.to_string(), to.to_string());
+        
+        let rel = rels.entry(key).or_default();
+        
+        // 強さを更新 (0 ~ 1000)
+        let new_strength = (rel.strength as i32 + delta).max(0).min(1000) as u32;
+        rel.strength = new_strength;
+        
+        // 最終接触時刻を更新
+        rel.last_interaction = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+            
+        log::info!("[Relationship] {} -> {}: Strength = {}", from, to, rel.strength);
+    }
 }
 
 impl Default for TokuManager {
@@ -354,9 +663,46 @@ pub fn agn_add_toku(user_id: &str, amount: u32) {
     TOKU_MANAGER.add_toku(user_id, amount, TokuReason::HelpProvided);
 }
 
+/// AGNから呼び出される徳スコア減算関数
+pub fn agn_subtract_toku(user_id: &str, amount: u32) {
+    TOKU_MANAGER.subtract_toku(user_id, amount, TokuReason::Penalty);
+}
+
 /// AGNから呼び出される徳スコア取得関数
 pub fn agn_get_toku(user_id: &str) -> u32 {
     TOKU_MANAGER.get_score(user_id)
+}
+
+/// AGNから呼び出される関係性取得関数
+pub fn agn_get_bond(from: &str, to: &str) -> Relationship {
+    TOKU_MANAGER.get_relationship(from, to)
+}
+
+/// AGNから呼び出される絆レベル取得関数
+pub fn agn_get_bond_level(from: &str, to: &str) -> u32 {
+    TOKU_MANAGER.get_relationship(from, to).level
+}
+
+/// AGNから呼び出される絆有無確認関数
+pub fn agn_has_bond(from: &str, to: &str) -> bool {
+    TOKU_MANAGER.get_relationship(from, to).has_bond()
+}
+
+/// AGNから呼び出される絆深化関数 (助け合い成功時)
+pub fn agn_deepen_bond(from: &str, to: &str, amount: u32) {
+    let mut rels = TOKU_MANAGER.relationships.lock().unwrap();
+    let key = (from.to_string(), to.to_string());
+    
+    let rel = rels.entry(key).or_insert_with(Relationship::new_bond);
+    rel.deepen(amount);
+    
+    log::info!("[Bond] {} ⇔ {}: Level {} (Strength {}, Helped {} times)", 
+        from, to, rel.level, rel.strength, rel.help_count);
+}
+
+/// AGNから呼び出される関係性更新関数 (後方互換)
+pub fn agn_update_bond(from: &str, to: &str, amount: i32) {
+    TOKU_MANAGER.update_relationship(from, to, amount);
 }
 
 /// 検出されたピア情報
@@ -417,6 +763,8 @@ pub struct P2PManager {
     current_beacon: Arc<Mutex<Option<BeaconConfig>>>,
     /// ピアキャッシュのTTL（秒）
     peer_cache_ttl: Duration,
+    /// フィードイベントのキャッシュ
+    feed_cache: Arc<Mutex<Vec<SocialTokuEvent>>>,
 }
 
 impl P2PManager {
@@ -426,6 +774,7 @@ impl P2PManager {
             detected_peers: Arc::new(Mutex::new(HashMap::new())),
             current_beacon: Arc::new(Mutex::new(None)),
             peer_cache_ttl: Duration::from_secs(30),
+            feed_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -635,6 +984,8 @@ pub struct SocialTokuEvent {
     pub timestamp: u64,
     /// メッセージ（オプション）
     pub message: Option<String>,
+    /// 画像URL（オプション）
+    pub image_url: Option<String>,
 }
 
 impl SocialTokuEvent {
@@ -657,6 +1008,7 @@ impl SocialTokuEvent {
             location: None, // 後で設定
             timestamp,
             message: None,
+            image_url: None,
         }
     }
     
@@ -667,6 +1019,11 @@ impl SocialTokuEvent {
     
     pub fn with_message(mut self, msg: &str) -> Self {
         self.message = Some(msg.to_string());
+        self
+    }
+
+    pub fn with_image(mut self, url: &str) -> Self {
+        self.image_url = Some(url.to_string());
         self
     }
 }
@@ -685,10 +1042,23 @@ impl P2PManager {
     /// フィードにイベントを追加
     pub fn add_feed_event(&self, event: SocialTokuEvent) {
         // TokuManagerのイベントリストとは別に、UI表示用のフィードを管理する想定
-        // ここでは簡易的にログ出力とコールバック発火（WASM側でポーリング）
-        
-        // メモリ内キャッシュに追加（実装予定）
-        // feed_cache.push(event);
+        let mut cache = self.feed_cache.lock().unwrap();
+        cache.insert(0, event); // 最新を先頭に
+        if cache.len() > 100 {
+            cache.pop();
+        }
+    }
+
+    /// イベントIDからイベントを取得
+    pub fn get_feed_event(&self, id: &str) -> Option<SocialTokuEvent> {
+        let cache = self.feed_cache.lock().unwrap();
+        cache.iter().find(|e| e.id == id).cloned()
+    }
+
+    /// 全フィードイベントを取得
+    pub fn get_all_feed_events(&self) -> Vec<SocialTokuEvent> {
+        let cache = self.feed_cache.lock().unwrap();
+        cache.clone()
     }
     
     // シミュレーション: 周囲からイベントを受信
@@ -768,6 +1138,72 @@ pub async fn agn_notify_peer(peer_id: &str, message: &str) -> Result<(), String>
     log::info!("[P2P] 通知送信: peer={}, message={}", peer_id, message);
     Ok(())
 }
+
+/// AGNから呼び出されるフィードイベント取得関数
+pub async fn agn_get_feed_event(id: &str) -> Option<SocialTokuEvent> {
+    P2P_MANAGER.get_feed_event(id)
+}
+
+/// AGNから呼び出される全フィードイベント取得関数
+pub async fn agn_get_all_feed_events() -> Vec<SocialTokuEvent> {
+    P2P_MANAGER.get_all_feed_events()
+}
+
+/// テスト用：フィードイベントを注入
+pub fn agn_inject_feed_event(event: SocialTokuEvent) {
+    P2P_MANAGER.add_feed_event(event);
+}
+
+// ============================================================
+// Proof of Kindness (PoK)
+// ============================================================
+
+/// 近接性の証明 (RSSIベース)
+pub struct ProximityVerifier;
+
+impl ProximityVerifier {
+    /// RSSI履歴から「実際にそこにいた」確率(Confidence)を算出
+    /// return: 0.0 (怪しい) ~ 1.0 (確実)
+    pub fn verify_presence(rssi_log: &[i16]) -> f32 {
+        if rssi_log.len() < 5 {
+            return 0.2; // データ不足
+        }
+
+        // 1. 平均RSSI
+        let sum: i32 = rssi_log.iter().map(|&x| x as i32).sum();
+        let avg = sum as f32 / rssi_log.len() as f32;
+
+        // 2. 分散 (Variance) - 自然な揺らぎがあるか？
+        // 機械的な固定値（スプーフィング）は分散が0に近い
+        let variance_sum: f32 = rssi_log.iter()
+            .map(|&x| (x as f32 - avg).powi(2))
+            .sum();
+        let variance = variance_sum / rssi_log.len() as f32;
+
+        // 判定ロジック
+        let mut confidence: f32 = 0.5;
+
+        // 距離判定: 近いほど信頼性が高い（遠くからのスプーフィングは難しい）
+        if avg > -60.0 { confidence += 0.3; }      // 非常に近い (<1m)
+        else if avg > -80.0 { confidence += 0.1; } // 近い (<5m)
+        else if avg < -90.0 { confidence -= 0.1; } // 遠い/不安定
+
+        // 揺らぎ判定: 
+        // 分散が極端に小さい(0-1) => スプーフィングの疑い (-0.3)
+        // 適度な揺らぎ(2-50) => 自然 (+0.2)
+        // 大きすぎる揺らぎ(>100) => 安定していない (-0.1)
+        if variance < 1.0 { confidence -= 0.4; }
+        else if variance >= 2.0 && variance < 50.0 { confidence += 0.2; }
+        
+        confidence.clamp(0.0, 1.0)
+    }
+}
+
+/// AGNから呼び出される近接証明検証関数
+pub fn agn_verify_presence(rssi_history: Vec<i16>) -> f32 {
+    ProximityVerifier::verify_presence(&rssi_history)
+}
+
 
 // ============================================================
 // テスト
@@ -911,5 +1347,47 @@ mod tests {
         
         assert_eq!(hash1, hash2); // 同じ入力は同じ出力
         assert_ne!(hash1, hash3); // 異なる入力は異なる出力
+    }
+
+    #[test]
+    fn test_secure_packet_roundtrip() {
+        let context = SecurityContext::new();
+        let public_key = context.verifying_key.to_bytes();
+        let signing_key = &context.signing_key;
+        
+        // Create Packet
+        let packet = EeyoSecurePacket::new(
+            BeaconType::Idle,
+            1234,
+            &public_key,
+            signing_key
+        );
+        
+        // Serialize
+        let bytes = packet.to_bytes();
+        assert_eq!(bytes.len(), EeyoSecurePacket::PACKET_SIZE, "Packet size mismatch");
+        
+        // Deserialize & Verify
+        let parsed = EeyoSecurePacket::from_bytes(&bytes);
+        assert!(parsed.is_some(), "Failed to parse/verify valid packet");
+        
+        let p = parsed.unwrap();
+        assert_eq!(p.toku_score, 1234);
+        assert_eq!(p.beacon_type, BeaconType::Idle);
+        assert_eq!(p.sender_public_key, public_key);
+    }
+
+    #[test]
+    fn test_tampered_packet() {
+        let context = SecurityContext::new();
+        let pub_key = context.verifying_key.to_bytes();
+        let packet = EeyoSecurePacket::new(BeaconType::NeedHelp, 500, &pub_key, &context.signing_key);
+        let mut bytes = packet.to_bytes();
+        
+        // Tamper with Toku Score (byte 4)
+        bytes[4] = bytes[4].wrapping_add(1);
+        
+        let parsed = EeyoSecurePacket::from_bytes(&bytes);
+        assert!(parsed.is_none(), "Tampered packet should fail verification");
     }
 }

@@ -1,7 +1,6 @@
 use wgpu::util::DeviceExt;
 use lyon::tessellation::*;
 use glyphon::{FontSystem, SwashCache, TextAtlas, TextRenderer, Resolution};
-use crate::symbol_table::Value;
 
 pub struct Renderer {
     // Lyon Tessellator
@@ -12,12 +11,23 @@ pub struct Renderer {
     font_system: FontSystem,
     swash_cache: SwashCache,
 
-    text_viewport: Option<Resolution>,
+    _text_viewport: Option<Resolution>,
     text_atlas: Option<TextAtlas>,
     text_renderer: Option<TextRenderer>,
     
     // Batching
     pub batches: Vec<DrawBatch>,
+    
+    // Text Queue
+    pub text_queue: Vec<TextDrawCommand>,
+}
+
+pub struct TextDrawCommand {
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+    pub color: [f32; 4],
+    pub size: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -33,6 +43,7 @@ pub struct GpuVertex {
     pub position: [f32; 2],
     pub color: [f32; 4],
     pub uv: [f32; 2],
+    pub effect_flags: u32,
 }
 
 impl Renderer {
@@ -42,10 +53,11 @@ impl Renderer {
             tessellator: FillTessellator::new(),
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
-            text_viewport: None,
+            _text_viewport: None,
             text_atlas: None,
             text_renderer: None,
             batches: Vec::new(),
+            text_queue: Vec::new(),
         }
     }
 
@@ -94,6 +106,7 @@ impl Renderer {
         self.geometry.vertices.clear();
         self.geometry.indices.clear();
         self.batches.clear();
+        self.text_queue.clear();
     }
 
     pub fn draw_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
@@ -105,6 +118,7 @@ impl Renderer {
                 position: [vertex.position().x, vertex.position().y],
                 color,
                 uv: [0.0, 0.0],
+                effect_flags: 0,
             }
         });
 
@@ -127,20 +141,26 @@ impl Renderer {
         drop(builder); 
         
         let end_indices = self.geometry.indices.len() as u32;
-        let end_indices = self.geometry.indices.len() as u32;
         
         self.update_batch(end_indices - start_indices, None);
     }
 
-    pub fn draw_rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: [f32; 4]) {
+    pub fn draw_rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: [f32; 4], effect_flags: u32) {
         let options = FillOptions::default();
         let start_indices = self.geometry.indices.len() as u32;
 
         let mut builder = BuffersBuilder::new(&mut self.geometry, |vertex: FillVertex| {
+            // Calculate UV based on bounding box for effects
+            let px = vertex.position().x;
+            let py = vertex.position().y;
+            let u = (px - x) / w;
+            let v = (py - y) / h;
+
             GpuVertex {
-                position: [vertex.position().x, vertex.position().y],
+                position: [px, py],
                 color,
-                uv: [0.0, 0.0],
+                uv: [u, v], // Pass UV for shaders
+                effect_flags,
             }
         });
 
@@ -191,6 +211,7 @@ impl Renderer {
                 position: [px, py],
                 color,
                 uv: [u, v],
+                effect_flags: 0,
             }
         });
 
@@ -219,7 +240,7 @@ impl Renderer {
         self.update_batch(end_indices - start_indices, None); 
     }
 
-    pub fn draw_image(&mut self, x: f32, y: f32, w: f32, h: f32, texture_key: &str) {
+    pub fn draw_image(&mut self, x: f32, y: f32, w: f32, h: f32, texture_key: &str, effect_flags: u32) {
         let color = [1.0, 1.0, 1.0, 1.0];
         let options = FillOptions::default();
         let start_indices = self.geometry.indices.len() as u32;
@@ -234,6 +255,7 @@ impl Renderer {
                 position: [px, py],
                 color,
                 uv: [u, v],
+                effect_flags,
             }
         });
 
@@ -252,7 +274,6 @@ impl Renderer {
         
         drop(builder);
         let end_indices = self.geometry.indices.len() as u32;
-        let end_indices = self.geometry.indices.len() as u32;
         
         self.update_batch(end_indices - start_indices, Some(texture_key));
     }
@@ -262,9 +283,9 @@ impl Renderer {
         // Simple multi-pass shadow
         let shadow_color = [0.0, 0.0, 0.0, 0.1];
         let offset = depth * 0.5;
-        self.draw_rounded_rect(x + offset, y + offset, w, h, radius, shadow_color);
+        self.draw_rounded_rect(x + offset, y + offset, w, h, radius, shadow_color, 0);
         if depth > 5.0 {
-             self.draw_rounded_rect(x + offset + 2.0, y + offset + 2.0, w, h, radius, [0.0, 0.0, 0.0, 0.05]);
+             self.draw_rounded_rect(x + offset + 2.0, y + offset + 2.0, w, h, radius, [0.0, 0.0, 0.0, 0.05], 0);
         }
     }
     
@@ -283,5 +304,70 @@ impl Renderer {
         });
 
         (vertex_buf, index_buf, self.geometry.indices.len() as u32)
+    }
+
+    pub fn draw_text(&mut self, text: &str, x: f32, y: f32, color: [f32; 4], size: f32) {
+        self.text_queue.push(TextDrawCommand {
+            text: text.to_string(),
+            x,
+            y,
+            color,
+            size,
+        });
+    }
+
+    pub fn render_text<'a>(&'a mut self, pass: &mut wgpu::RenderPass<'a>, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) {
+        if self.text_renderer.is_none() { return; }
+        if self.text_queue.is_empty() { return; }
+
+        let renderer = self.text_renderer.as_mut().unwrap();
+        let font_system = &mut self.font_system;
+        let atlas = self.text_atlas.as_mut().unwrap();
+
+        let mut buffers = Vec::new();
+        
+        // Populate buffers
+        for cmd in &self.text_queue {
+            let mut buffer = glyphon::Buffer::new(font_system, glyphon::Metrics::new(cmd.size, cmd.size * 1.2));
+            buffer.set_size(font_system, width as f32, height as f32);
+            buffer.set_text(
+                font_system, 
+                &cmd.text, 
+                glyphon::Attrs::new().color(glyphon::Color::rgba((cmd.color[0]*255.0) as u8, (cmd.color[1]*255.0) as u8, (cmd.color[2]*255.0) as u8, (cmd.color[3]*255.0) as u8)).family(glyphon::Family::SansSerif), 
+                glyphon::Shaping::Advanced
+            );
+            buffers.push((buffer, cmd.x, cmd.y));
+        }
+
+        // Create TextAreas
+        // Note: Buffer needs to be moved or referenced? TextArea takes &Buffer.
+        // We created buffers in a Vec, so we can reference them.
+        let text_areas: Vec<glyphon::TextArea> = buffers.iter().map(|(buf, x, y)| {
+            glyphon::TextArea {
+                buffer: buf,
+                left: *x,
+                top: *y,
+                scale: 1.0,
+                bounds: glyphon::TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: width as i32,
+                    bottom: height as i32,
+                },
+                default_color: glyphon::Color::rgb(255, 255, 255),
+            }
+        }).collect();
+
+        renderer.prepare(
+            device,
+            queue,
+            font_system,
+            atlas,
+            Resolution { width, height },
+            text_areas.iter().cloned(), 
+            &mut self.swash_cache,
+        ).unwrap();
+
+        renderer.render(atlas, pass).unwrap();
     }
 }

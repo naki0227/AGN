@@ -1,0 +1,24 @@
+// Kizuna Logic Demo
+
+// 1. 助け合いボーナス
+on Event(HelpGiven) from Helper to Target {
+    // 徳の循環: ヘルパーに徳+50
+    Helper.徳 に 50 を 増やす
+    
+    // 絆を深める
+    bond(Helper, Target) を 深くする
+    
+    // 結果を表示
+    let msg = 想像する("二人は助け合い、絆が生まれました。")
+    show msg
+}
+
+// 2. 感謝の連鎖
+on Event(ThankYou) from Sender to Receiver {
+    bond(Sender, Receiver) を 3 深くする
+    
+    // 絆レベルによる分岐
+    // if bond(Sender, Receiver).level > 5 then
+    //     show "二人は親友です！"
+    // end
+}

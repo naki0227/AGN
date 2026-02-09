@@ -97,17 +97,31 @@ impl CodeGenerator {
             Statement::Block { .. } | Statement::Layout { .. } => {
                 String::from("    ; UI Block/Layout not implemented in LLVM backend yet\n")
             }
-            Statement::Assignment { name, value } => {
-                self.emit_assignment(name, value)
+            Statement::Assignment { target, value } => {
+                if let Expr::Variable(name) = target {
+                    self.emit_assignment(name, value)
+                } else {
+                    String::from("    ; Complex assignment not supported in codegen yet\n")
+                }
             }
             Statement::BinaryOp { target, operand, verb } => {
-                self.emit_binary_op(target, operand, verb)
+                if let Expr::Variable(name) = target {
+                    self.emit_binary_op(name, operand, verb)
+                } else {
+                    String::from("    ; Complex binary op not supported in codegen yet\n")
+                }
             }
             Statement::UnaryOp { operand, verb } => {
                 self.emit_unary_op(operand, verb)
             }
             Statement::LoadAsset { .. } | Statement::ComponentDefine { .. } => {
                 String::from("    ; LoadAsset/ComponentDefine not implemented in LLVM backend yet\n")
+            }
+            Statement::ActionCall { name, .. } => {
+                format!("    ; Action call: {} (not in LLVM yet)\n", name)
+            }
+            Statement::ReturnStatement { .. } => {
+                String::from("    ; Return statement\n")
             }
             _ => String::from("    ; Unsupported statement\n"),
         }
@@ -129,7 +143,7 @@ impl CodeGenerator {
             }
             Expr::String(s) => {
                 // 文字列は別途処理が必要（Phase 4で拡張）
-                let const_name = self.add_string_constant(s);
+                let _const_name = self.add_string_constant(s);
                 ir.push_str(&format!("    ; String assignment: {} = \"{}\"\n", name, s));
                 // ir.push_str(&format!("    store i8* getelementptr ... (TODO)\n")); 
             }
@@ -143,8 +157,12 @@ impl CodeGenerator {
             // Eeyo: 空間・時間型（文字列として処理）
             Expr::Distance { value, unit } | Expr::Duration { value, unit } => {
                 let s = format!("{}{}", value, unit);
-                let const_name = self.add_string_constant(&s);
+                let _const_name = self.add_string_constant(&s);
                 ir.push_str(&format!("    ; Distance/Duration assignment: {} = \"{}\"\n", name, s));
+            }
+            // AGN 2.0
+            Expr::PropertyAccess { .. } | Expr::Bond(_, _) | Expr::Call { .. } => {
+                 ir.push_str(&format!("    ; Complex expression not implemented in codegen: {:?}\n", value));
             }
         }
 
@@ -182,6 +200,13 @@ impl CodeGenerator {
             // Eeyo: 空間・時間型（数値に変換）
             Expr::Distance { value, .. } | Expr::Duration { value, .. } => {
                 format!("{:.1}", value)
+            }
+            // AGN 2.0
+            Expr::PropertyAccess { .. } => {
+                "0.0".to_string() // Stub
+            }
+            Expr::Bond(_, _) | Expr::Call { .. } => {
+                "0.0".to_string() // Stub
             }
         };
 
@@ -267,8 +292,19 @@ impl CodeGenerator {
                     // Eeyo: 空間・時間型（文字列として表示）
                     Expr::Distance { value, unit } | Expr::Duration { value, unit } => {
                         let s = format!("{}{}", value, unit);
-                        let const_name = self.add_string_constant(&s);
+                        let _const_name = self.add_string_constant(&s);
                         ir.push_str(&format!("    ; Print Distance/Duration: \"{}\"\n", s));
+                    }
+                    // AGN 2.0
+                    Expr::PropertyAccess { .. } => {
+                         let s = "[PropertyAccess Stub]";
+                         let _const_name = self.add_string_constant(s);
+                         ir.push_str(&format!("    ; Print PropertyAccess: \"{}\"\n", s));
+                    }
+                    Expr::Bond(_, _) | Expr::Call { .. } => {
+                         let s = "[Bond/Call Stub]";
+                         let _const_name = self.add_string_constant(s);
+                         ir.push_str(&format!("    ; Print Bond/Call: \"{}\"\n", s));
                     }
                 }
             }

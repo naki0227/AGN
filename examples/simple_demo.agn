@@ -1,0 +1,9 @@
+// Simple Demo - Working Syntax
+
+let Score is 0
+
+repeat 3 times
+    add 10 to Score
+end
+
+show Score

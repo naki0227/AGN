@@ -23,6 +23,10 @@ pub enum Token {
     ParticleNa,
     /// 助詞「の」- 所有/連体修飾
     ParticleNo,
+    /// 助詞「と」- 並列/共同
+    ParticleTo,
+    /// 助詞「が」- 主格
+    ParticleGa,
     /// 副詞（実行修飾子）
     Adverb(String),
     
@@ -117,14 +121,58 @@ pub enum Token {
     KeywordPerson,
     /// で (条件接続)
     ParticleDe,
-    /// が (主格)
-    ParticleGa,
+    /// 間に / Between
+    KeywordBetween,
+    /// ある (存在)
+    KeywordAre,
     
     // === Eeyo: 信頼スコア ===
     /// 徳
     KeywordToku,
     /// 加算する (徳スコア専用動詞)
     KeywordAccrue,
+    
+    // === AGN 2.0 (Social Layer) ===
+    /// . (Dot) - プロパティアクセス
+    Dot,
+    /// ルール / Rule
+    KeywordRule,
+    /// アクション / Action
+    KeywordAction,
+    /// 結果 / Result
+    KeywordResult,
+    /// 増やす / Increase
+    KeywordIncrease,
+    /// 減らす / Decrease
+    KeywordDecrease,
+    /// 更新する / Update
+    KeywordUpdate,
+    /// 絆 / Bond
+    KeywordBond,
+    /// ランク / Rank
+    KeywordRank,
+    /// 付ける / Attach
+    KeywordAttach,
+    /// かつ / And
+    KeywordAnd,
+    
+    // === Phase 15: Event-Driven Kizuna Logic ===
+    /// から / From (Event Source)
+    KeywordFrom,
+    /// イベント / Event
+    KeywordEvent,
+    
+    // Symbols
+    /// {
+    LBrace,
+    /// }
+    RBrace,
+    /// (
+    LParen,
+    /// )
+    RParen,
+    /// ,
+    Comma,
     
     /// 改行
     Newline,
@@ -138,16 +186,22 @@ const KNOWN_JP_VERBS: &[&str] = &[
     "要約する", "翻訳する", "読み込む", "つなぐ", // AI verbs & Asset Load & UI
     // Eeyo: 空間・通信動詞
     "探す", "発信する", "通知する", "加算する",
+    // AGN 2.0: ソーシャル動詞
+    "増やす", "減らす", "更新する", "付ける", "とする",
+    "想像する", // Phase 11
+    "get_bond", "set_status", // Phase 15 (Japanese context but func name likely reused or translated?)
+    // 日本語エイリアスも検討: "絆を取得する", "ステータスを設定する"
 ];
 
 /// 既知の英語動詞リスト
 const KNOWN_EN_VERBS: &[&str] = &[
     "show", "add", "subtract", "multiply", "divide", "print",
     "summarize", "translate",  // AI verbs
+    "get_bond", "set_status", // Phase 15
 ];
 
 /// 特殊名詞（出力先など）
-const SPECIAL_NOUNS: &[&str] = &["画面", "Screen"];
+// const SPECIAL_NOUNS: &[&str] = &["画面", "Screen"];
 
 /// 既知の副詞リスト
 const KNOWN_ADVERBS: &[&str] = &["並列で", "async", "parallel"];
@@ -174,6 +228,21 @@ const ENGLISH_KEYWORDS: &[(&str, fn() -> Token)] = &[
     ("inside", || Token::KeywordInside),
     ("vertical", || Token::KeywordVertical),
     ("horizontal", || Token::KeywordHorizontal),
+    
+    // AGN 2.0: Social Layer
+    ("rule", || Token::KeywordRule),
+    ("action", || Token::KeywordAction),
+    ("result", || Token::KeywordResult),
+    ("increase", || Token::KeywordIncrease),
+    ("decrease", || Token::KeywordDecrease),
+    ("update", || Token::KeywordUpdate),
+    ("bond", || Token::KeywordBond),
+    ("rank", || Token::KeywordRank),
+    ("attach", || Token::KeywordAttach),
+    ("and", || Token::KeywordAnd),
+    // Phase 15
+    ("from", || Token::KeywordFrom),
+    ("event", || Token::KeywordEvent),
 ];
 
 /// 日本語キーワード
@@ -216,6 +285,23 @@ const JAPANESE_KEYWORDS: &[(&str, fn() -> Token)] = &[
     ("徳", || Token::KeywordToku),
     ("で", || Token::ParticleDe),
     ("が", || Token::ParticleGa),
+    
+    // AGN 2.0: Social Layer
+    ("ルール", || Token::KeywordRule),
+    ("アクション", || Token::KeywordAction),
+    ("結果", || Token::KeywordResult),
+    ("増やす", || Token::KeywordIncrease),
+    ("減らす", || Token::KeywordDecrease),
+    ("更新する", || Token::KeywordUpdate),
+    ("絆", || Token::KeywordBond),
+    ("ランク", || Token::KeywordRank),
+    ("付ける", || Token::KeywordAttach),
+    ("がある", || Token::KeywordAre), // "絆がある" などの判定用
+    ("にある", || Token::KeywordAre),
+    ("かつ", || Token::KeywordAnd),
+    // Phase 15
+    ("から", || Token::KeywordFrom),
+    ("イベント", || Token::KeywordEvent),
 ];
 
 pub struct Lexer {
@@ -445,6 +531,71 @@ impl Lexer {
                     // それ以外は名詞
                     tokens.push(Token::Noun(word));
                 }
+                Some('{') => {
+                    tokens.push(Token::LBrace);
+                    self.advance();
+                }
+                Some('}') => {
+                    tokens.push(Token::RBrace);
+                    self.advance();
+                }
+                Some('(') => {
+                    tokens.push(Token::LParen);
+                    self.advance();
+                }
+                Some(')') => {
+                    tokens.push(Token::RParen);
+                    self.advance();
+                }
+                Some(',') | Some('、') => {
+                    tokens.push(Token::Comma);
+                    self.advance();
+                }
+                Some('>') => {
+                    tokens.push(Token::KeywordGreaterThan);
+                    self.advance();
+                }
+                Some('<') => {
+                    tokens.push(Token::KeywordLessThan);
+                    self.advance();
+                }
+                Some('=') => {
+                    // Check for ==
+                    if self.peek_str(1) == "=" {
+                        tokens.push(Token::KeywordEquals);
+                        self.advance_by(2);
+                    } else {
+                        // Single = is treated as Is/Assignment?
+                        // Or just Equals?
+                        // For now let's treat = as Equals for condition compatibility
+                        tokens.push(Token::KeywordEquals);
+                        self.advance();
+                    }
+                }
+                Some('-') => {
+                    // Check for negative number
+                    let is_negative_number = if let Some(next) = self.input.get(self.pos + 1) {
+                        next.is_ascii_digit()
+                    } else {
+                        false
+                    };
+
+                    if is_negative_number {
+                        self.advance(); // consume '-'
+                        let token = self.read_number();
+                        let token = match token {
+                            Token::Number(n) => Token::Number(-n),
+                            Token::Distance { value, unit } => Token::Distance { value: -value, unit },
+                            Token::Duration { value, unit } => Token::Duration { value: -value, unit },
+                            _ => token,
+                        };
+                        tokens.push(token);
+                    } else {
+                        // Just a hyphen (maybe for separating words? or unknown)
+                        // For now, skip it like before to avoid breaking other things
+                        self.advance();
+                    }
+                }
                 Some(_) => {
                     // コメント除去
                     if self.peek_str(2) == "//" {
@@ -455,8 +606,26 @@ impl Lexer {
                         continue;
                     }
 
+                    // Dot (.) check
+                    if self.current() == Some('.') {
+                        // Check if next char is digit (fractional number)
+                        let is_fraction = if let Some(next) = self.input.get(self.pos + 1) {
+                            next.is_ascii_digit()
+                        } else {
+                            false
+                        };
+
+                        if is_fraction {
+                            tokens.push(self.read_number());
+                        } else {
+                            tokens.push(Token::Dot);
+                            self.advance();
+                        }
+                        continue;
+                    }
+
                     // 日本語キーワードチェック (MUST come before particle check!)
-                    // This ensures ならば is matched before な is matched as a particle
+                    // This ensures ならば is matched before なが matched as a particle
                     let mut matched_kw = false;
                     for (kw, token_fn) in JAPANESE_KEYWORDS {
                         let kw_len = kw.chars().count();
@@ -499,6 +668,16 @@ impl Lexer {
                     }
                     if self.peek_str(1) == "の" {
                         tokens.push(Token::ParticleNo);
+                        self.advance();
+                        continue;
+                    }
+                    if self.peek_str(1) == "と" {
+                        tokens.push(Token::ParticleTo);
+                        self.advance();
+                        continue;
+                    }
+                    if self.peek_str(1) == "が" {
+                        tokens.push(Token::ParticleGa);
                         self.advance();
                         continue;
                     }
@@ -684,5 +863,46 @@ mod tests {
         assert_eq!(tokens[1], Token::KeywordNearer);  // より近い
         assert_eq!(tokens[2], Token::KeywordPerson);  // 人
         assert_eq!(tokens[3], Token::ParticleDe);     // で
+    }
+
+    // === AGN 2.0 (Social Layer) Tests ===
+
+    #[test]
+    fn test_dot_access() {
+        let mut lexer = Lexer::new("User.Toku");
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens[0], Token::Noun("User".to_string()));
+        assert_eq!(tokens[1], Token::Dot);
+        assert_eq!(tokens[2], Token::Noun("Toku".to_string()));
+    }
+
+    #[test]
+    fn test_dot_number_disambiguation() {
+        // .5 は数値、.Toku lambda は Dot + Noun
+        let mut lexer = Lexer::new("0.5 .Toku");
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens[0], Token::Number(0.5));
+        assert_eq!(tokens[1], Token::Dot);
+        assert_eq!(tokens[2], Token::Noun("Toku".to_string()));
+    }
+
+    #[test]
+    fn test_rule_definition() {
+        let mut lexer = Lexer::new("ルール MyRule");
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens[0], Token::KeywordRule);
+        assert_eq!(tokens[1], Token::Noun("MyRule".to_string()));
+    }
+
+    #[test]
+    fn test_action_verbs() {
+        let mut lexer = Lexer::new("徳 を 増やす ランク を 更新する");
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens[0], Token::KeywordToku);
+        assert_eq!(tokens[1], Token::ParticleWo);
+        assert_eq!(tokens[2], Token::KeywordIncrease);
+        assert_eq!(tokens[3], Token::KeywordRank);
+        assert_eq!(tokens[4], Token::ParticleWo);
+        assert_eq!(tokens[5], Token::KeywordUpdate);
     }
 }

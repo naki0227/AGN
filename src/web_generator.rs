@@ -1,7 +1,7 @@
 //! AGN Web Generator - WebAssembly用プロジェクト生成器
 //! AGN ASTをRust + wasm-bindgenコードにトランスパイルし、ビルド環境を構築する
 
-use crate::parser::{Condition, Expr, Program, Statement};
+use crate::parser::{Expr, Program, Statement};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -139,34 +139,48 @@ wasm-bindgen = "0.2"
             Statement::Layout { .. } => {
                 String::from("    // Layout command not yet transpiled for Web\n")
             }
-            Statement::Assignment { name, value } => {
-                let val = self.transpile_expr_value(value);
-                format!("    let {} = {};\n", name, val)
+            Statement::Assignment { target, value } => {
+                if let Expr::Variable(name) = target {
+                    let val = self.transpile_expr_value(value);
+                    format!("    let {} = {};\n", name, val)
+                } else {
+                    String::from("    // Complex assignment not supported in Web transpiler yet\n")
+                }
             }
             Statement::LoadAsset { target, path } => {
-                let path_val = self.transpile_expr_value(path);
-                // Serialize as JSON string
-                // Using escaped quotes for JSON structure inside Rust string
-                format!("    let {} = format!(\"{{\\\"type\\\":\\\"image\\\", \\\"src\\\":\\\"{{}}\\\"}}\", {});\n", target, path_val)
+                if let Expr::Variable(name) = target {
+                    let path_val = self.transpile_expr_value(path);
+                    format!("    let {} = format!(\"{{\\\"type\\\":\\\"image\\\", \\\"src\\\":\\\"{{}}\\\"}}\", {});\n", name, path_val)
+                } else {
+                    String::from("    // Complex LoadAsset not supported in Web transpiler yet\n")
+                }
             }
             Statement::ComponentDefine { target, style, component } => {
-                 // Serialize as JSON string
-                 format!("    let {} = format!(\"{{\\\"type\\\":\\\"component\\\", \\\"style\\\":\\\"{}\\\", \\\"ty\\\":\\\"{}\\\"}}\");\n", target, style, component)
+                 if let Expr::Variable(name) = target {
+                     format!("    let {} = format!(\"{{\\\"type\\\":\\\"component\\\", \\\"style\\\":\\\"{}\\\", \\\"ty\\\":\\\"{}\\\"}}\");\n", name, style, component)
+                 } else {
+                     String::from("    // Complex ComponentDefine not supported in Web transpiler yet\n")
+                 }
             }
             Statement::BinaryOp { target, operand, verb } => {
-                let op_char = match verb.as_str() {
-                    "足す" => "+",
-                    "引く" => "-",
-                    "掛ける" => "*",
-                    "割る" => "/",
-                    _ => "+",
-                };
-                let val = self.transpile_expr_value(operand);
-                format!("    let {} = {} {} {};\n", target, target, op_char, val)
+                if let Expr::Variable(name) = target {
+                    let op_char = match verb.as_str() {
+                        "足す" => "+",
+                        "引く" => "-",
+                        "掛ける" => "*",
+                        "割る" => "/",
+                        _ => "+",
+                    };
+                    let val = self.transpile_expr_value(operand);
+                    format!("    let {} = {} {} {};\n", name, name, op_char, val)
+                } else {
+                    String::from("    // Complex BinaryOp not supported in Web transpiler yet\n")
+                }
             }
             Statement::EventHandler { target, event, body } => {
                 let mut s = String::new();
-                s.push_str(&format!("    // Event: on {} {}\n", target, event));
+                let target_name = if let Expr::Variable(n) = target { n.clone() } else { format!("{:?}", target) };
+                s.push_str(&format!("    // Event: on {} {}\n", target_name, event));
                 for stmt in body {
                      s.push_str(&format!("    //   Body: {:?}\n", stmt));
                 }
@@ -174,6 +188,12 @@ wasm-bindgen = "0.2"
             }
             Statement::AiOp { result: _, input: _, verb: _, options: _ } => {
                  String::from("    // AiOp (Complex Assignment) not fully supported in Wasm yet\n")
+            }
+            Statement::ActionCall { name, .. } => {
+                 format!("    // Action call: {} (Wasm stub)\n", name)
+            }
+            Statement::ReturnStatement { .. } => {
+                 String::from("    // Return statement\n")
             }
             _ => format!("    // Unsupported statement in Wasm: {:?}\n", stmt),
         }
@@ -187,6 +207,10 @@ wasm-bindgen = "0.2"
             // Eeyo: 空間・時間リテラル
             Expr::Distance { value, unit } => format!("\"{:.1}{}\"", value, unit),
             Expr::Duration { value, unit } => format!("\"{:.1}{}\"", value, unit),
+            // AGN 2.0: Property Access (Stub)
+            Expr::PropertyAccess { .. } => String::from("\"[PropertyAccess Stub]\""),
+            Expr::Bond(_, _) => String::from("\"[Bond Stub]\""),
+            Expr::Call { name, .. } => format!("\"[Call Stub: {}]\"", name),
         }
     }
 

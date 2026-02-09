@@ -103,6 +103,7 @@ impl MemoryManager {
                 // Eeyo: 空間・時間型はスタック割当
                 InferredType::Distance { .. } => stats.stack_allocations += 1,
                 InferredType::Duration { .. } => stats.stack_allocations += 1,
+                InferredType::Bond => stats.stack_allocations += 1, // Bond is metadata/ref
             }
         }
         

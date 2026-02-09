@@ -14,6 +14,7 @@ pub enum InferredType {
     // Eeyo: 空間・時間型 (Phase 13)
     Distance { unit: String },  // "m", "km"
     Duration { unit: String },  // "秒", "分", "時間"
+    Bond,                       // 絆 (Relationship)
 }
 
 impl std::fmt::Display for InferredType {
@@ -24,6 +25,7 @@ impl std::fmt::Display for InferredType {
             InferredType::Unknown => write!(f, "Unknown"),
             InferredType::Distance { unit } => write!(f, "Distance({})", unit),
             InferredType::Duration { unit } => write!(f, "Duration({})", unit),
+            InferredType::Bond => write!(f, "Bond"),
         }
     }
 }
@@ -107,46 +109,54 @@ impl TypeInferencer {
         variables: &mut std::collections::HashMap<String, VariableMetadata>,
     ) {
         match stmt {
-            Statement::Assignment { name, value } => {
+            Statement::Assignment { target, value } => {
                 let (inferred_type, confidence, reason) = self.infer_from_expr(value);
                 
-                variables.insert(name.clone(), VariableMetadata {
-                    name: name.clone(),
-                    inferred_type,
-                    lifetime: Lifetime { start: line_num, end: line_num },
-                    confidence,
-                    reason,
-                });
+                if let Expr::Variable(name) = target {
+                    variables.insert(name.clone(), VariableMetadata {
+                        name: name.clone(),
+                        inferred_type,
+                        lifetime: Lifetime { start: line_num, end: line_num },
+                        confidence,
+                        reason,
+                    });
+                }
             }
             Statement::LoadAsset { target, path: _ } => {
-                variables.insert(target.clone(), VariableMetadata {
-                    name: target.clone(),
-                    inferred_type: InferredType::String, // Assets path treated as string/image
-                    lifetime: Lifetime { start: line_num, end: line_num },
-                    confidence: 0.9,
-                    reason: "Asset loaded".to_string(),
-                });
+                if let Expr::Variable(name) = target {
+                    variables.insert(name.clone(), VariableMetadata {
+                        name: name.clone(),
+                        inferred_type: InferredType::String, // Assets path treated as string/image
+                        lifetime: Lifetime { start: line_num, end: line_num },
+                        confidence: 0.9,
+                        reason: "Asset loaded".to_string(),
+                    });
+                }
             }
             Statement::ComponentDefine { target, style: _, component: _ } => {
-                variables.insert(target.clone(), VariableMetadata {
-                    name: target.clone(),
-                    inferred_type: InferredType::Unknown, // Component type
-                    lifetime: Lifetime { start: line_num, end: line_num },
-                    confidence: 0.8,
-                    reason: "UI Component defined".to_string(),
-                });
+                if let Expr::Variable(name) = target {
+                    variables.insert(name.clone(), VariableMetadata {
+                        name: name.clone(),
+                        inferred_type: InferredType::Unknown, // Component type
+                        lifetime: Lifetime { start: line_num, end: line_num },
+                        confidence: 0.8,
+                        reason: "UI Component defined".to_string(),
+                    });
+                }
             }
             Statement::BinaryOp { target, operand, verb } => {
                 // 演算対象は数値型であるべき
-                if let Some(var) = variables.get_mut(target) {
-                    var.lifetime.end = line_num;
-                    
-                    // 演算動詞から型を強化推論
-                    if matches!(verb.as_str(), "足す" | "引く" | "掛ける" | "割る") {
-                        if var.inferred_type == InferredType::Unknown {
-                            var.inferred_type = InferredType::Number;
-                            var.confidence = 0.9;
-                            var.reason = format!("Used in arithmetic operation: {}", verb);
+                if let Expr::Variable(name) = target {
+                    if let Some(var) = variables.get_mut(name) {
+                        var.lifetime.end = line_num;
+                        
+                        // 演算動詞から型を強化推論
+                        if matches!(verb.as_str(), "足す" | "引く" | "掛ける" | "割る") {
+                            if var.inferred_type == InferredType::Unknown {
+                                var.inferred_type = InferredType::Number;
+                                var.confidence = 0.9;
+                                var.reason = format!("Used in arithmetic operation: {}", verb);
+                            }
                         }
                     }
                 }
@@ -185,13 +195,15 @@ impl TypeInferencer {
             }
             Statement::AiOp { result, input: _, verb: _, options: _ } => {
                 // AI操作の結果は常にString
-                variables.insert(result.clone(), VariableMetadata {
-                    name: result.clone(),
-                    inferred_type: InferredType::String,
-                    lifetime: Lifetime { start: line_num, end: line_num },
-                    confidence: 1.0,
-                    reason: "Result of AI operation".to_string(),
-                });
+                if let Expr::Variable(name) = result {
+                    variables.insert(name.clone(), VariableMetadata {
+                        name: name.clone(),
+                        inferred_type: InferredType::String,
+                        lifetime: Lifetime { start: line_num, end: line_num },
+                        confidence: 1.0,
+                        reason: "Result of AI operation".to_string(),
+                    });
+                }
             }
             Statement::ScreenOp { operand: _ } => {
                 // Screen出力は変数を更新しない
@@ -204,8 +216,10 @@ impl TypeInferencer {
             }
             Statement::Block { target, body } => {
                 // Block operates on target (ensure implicit usage)
-                if let Some(var) = variables.get_mut(target) {
-                    var.lifetime.end = line_num + body.len();
+                if let Expr::Variable(name) = target {
+                    if let Some(var) = variables.get_mut(name) {
+                        var.lifetime.end = line_num + body.len();
+                    }
                 }
                 
                 // Process body
@@ -215,9 +229,11 @@ impl TypeInferencer {
             }
             Statement::Layout { target, direction: _ } => {
                 // Layout updates target
-                if let Some(var) = variables.get_mut(target) {
-                    var.lifetime.end = line_num;
-                    var.reason = "Layout applied".to_string();
+                if let Expr::Variable(name) = target {
+                    if let Some(var) = variables.get_mut(name) {
+                        var.lifetime.end = line_num;
+                        var.reason = "Layout applied".to_string();
+                    }
                 }
             }
             Statement::DelayStatement { body, .. } => {
@@ -226,26 +242,89 @@ impl TypeInferencer {
                     self.process_statement(s, line_num, variables);
                 }
             }
-            Statement::AnimateStatement { value, .. } => {
-                // Animation affects UI prop and might use variable
-                if let Expr::Variable(name) = value {
-                    if let Some(var) = variables.get_mut(name) {
-                        var.lifetime.end = line_num;
-                    }
+            Statement::AnimateStatement { .. } => {
+                // Animation doesn't introduce variables
+            },
+            
+            Statement::EventListener { event_type: _, from_var, to_var, body } => {
+                // Infer body
+                for stmt in body {
+                    self.process_statement(stmt, line_num, variables);
+                }
+                
+                // Add variables for from/to
+                if let Some(n) = from_var {
+                    variables.insert(n.clone(), VariableMetadata {
+                        name: n.clone(),
+                        inferred_type: InferredType::String,
+                        lifetime: Lifetime { start: line_num, end: line_num + 10 },
+                        confidence: 1.0,
+                        reason: "Event listener 'from' variable".to_string(),
+                    });
+                }
+                if let Some(n) = to_var {
+                    variables.insert(n.clone(), VariableMetadata {
+                        name: n.clone(),
+                        inferred_type: InferredType::String,
+                        lifetime: Lifetime { start: line_num, end: line_num + 10 },
+                        confidence: 1.0,
+                        reason: "Event listener 'to' variable".to_string(),
+                    });
                 }
             }
             // Eeyo: 空間ステートメント（後方互換性のためスキップ）
             Statement::SpatialSearch { result, .. } => {
-                variables.insert(result.clone(), VariableMetadata {
-                    name: result.clone(),
-                    inferred_type: InferredType::Unknown,
-                    lifetime: Lifetime { start: line_num, end: line_num },
-                    confidence: 0.5,
-                    reason: "空間検索結果".to_string(),
-                });
+                if let Expr::Variable(name) = result {
+                    variables.insert(name.clone(), VariableMetadata {
+                        name: name.clone(),
+                        inferred_type: InferredType::Unknown,
+                        lifetime: Lifetime { start: line_num, end: line_num },
+                        confidence: 0.5,
+                        reason: "空間検索結果".to_string(),
+                    });
+                }
             }
             Statement::BeaconBroadcast { .. } | Statement::Notify { .. } | Statement::TokuAccrue { .. } => {
                 // Eeyo用の空間ステートメント（型推論不要）
+            }
+            // AGN 2.0: Social Layer statements
+            Statement::VariableUpdate { target, value, verb } => {
+                // Determine target name (if simple variable)
+                 let target_name = match target {
+                     Expr::Variable(n) => Some(n.clone()),
+                     _ => None, // Complex target like PropertyAccess
+                 };
+                 
+                 if let Some(name) = target_name {
+                      if let Some(var) = variables.get_mut(&name) {
+                          var.lifetime.end = line_num;
+                          var.reason = format!("Updated by {}", verb);
+                      }
+                 }
+                 
+                 if let Expr::Variable(n) = value {
+                      if let Some(var) = variables.get_mut(n) {
+                          var.lifetime.end = line_num;
+                      }
+                 }
+            }
+            Statement::RuleDefinition { name: _, body } => {
+                 for (idx, inner_stmt) in body.iter().enumerate() {
+                     self.process_statement(inner_stmt, line_num + idx, variables);
+                 }
+            }
+            Statement::ActionDefinition { name: _, params: _, body } => {
+                 for (idx, inner_stmt) in body.iter().enumerate() {
+                     self.process_statement(inner_stmt, line_num + idx, variables);
+                 }
+            }
+            Statement::ReturnStatement { value } => {
+                 let _ = self.infer_from_expr(value);
+            }
+            Statement::ActionCall { name: _, args } => {
+                 for arg in args {
+                     let _ = self.infer_from_expr(arg);
+                 }
             }
         }
     }
@@ -278,6 +357,27 @@ impl TypeInferencer {
                 1.0,
                 format!("Duration literal with unit '{}'", unit),
             ),
+            // AGN 2.0
+            Expr::PropertyAccess { target: _, property: _ } => (
+                InferredType::Unknown,
+                0.5,
+                "Property access result".to_string(),
+            ),
+            Expr::Bond(_, _) => (
+                InferredType::Bond,
+                1.0,
+                "Relationship between users".to_string(),
+            ),
+            Expr::Call { name: _, args } => {
+                for arg in args {
+                    let _ = self.infer_from_expr(arg);
+                }
+                (
+                    InferredType::Unknown,
+                    0.5,
+                    "Action/Rule call result".to_string(),
+                )
+            }
         }
     }
 

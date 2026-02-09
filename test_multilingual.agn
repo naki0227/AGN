@@ -1,8 +1,0 @@
-X is 0
-repeat 10 times
-    add 1 to X
-    if X equals 5 then
-        show X
-    end
-end
-show X

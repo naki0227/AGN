@@ -1,0 +1,24 @@
+// Kizato Feed Demo - Visual Test
+
+// UI定義: カード風のフィード
+FeedCard is Card containing "徳フィード" with style "Header"
+Author is Label containing "TokuMaster さん"
+Message is Label containing "徳を積むのです！"
+Score is Label containing "徳: 5000"
+
+// レイアウト構築
+FeedCard has Author
+FeedCard has Message
+FeedCard has Score
+
+// ボタン
+TokuButton is Button containing "徳を送る" with id "toku_send"
+
+// イベントハンドラ
+when TokuButton is clicked {
+    Score を "徳: 5100" に 変更する
+}
+
+// 画面に表示
+FeedCard を 表示する
+TokuButton を 表示する

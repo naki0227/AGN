@@ -8,6 +8,28 @@ use crate::graphics::animation::{AnimationController, Animation};
 use crate::symbol_table::{SymbolTable, Value};
 use wgpu::util::DeviceExt;
 use image::GenericImageView;
+use web_time::Instant;
+ // Add rand dependency? Or simple random.
+// rand is not in Cargo.toml potentially. Use simple random or add rand.
+// Check Cargo.toml first? Or just use a simple PRNG helper.
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Globals {
+    pub screen_size: [f32; 2],
+    pub time: f32,
+    pub _pad: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct Particle {
+    pub pos: [f32; 2],
+    pub vel: [f32; 2],
+    pub color: [f32; 4],
+    pub size: f32,
+    pub life: f32,
+    pub decay: f32,
+}
 
 pub struct State {
     pub surface: wgpu::Surface<'static>,
@@ -26,13 +48,15 @@ pub struct State {
     pub event_handlers: HashMap<String, HashMap<String, Vec<Animation>>>,
     pub hovered_component: Option<String>,
     pub cursor_pos: Option<(f32, f32)>,
+    pub particles: Vec<Particle>, // NEW
     
     // Cache
     pub layout_rects: Vec<(f32, f32, f32, f32, String)>, // x,y,w,h, label (only for hit testing)
     
     // Resources
     pub bind_group: wgpu::BindGroup,
-    pub screen_size_buffer: wgpu::Buffer,
+    pub globals_buffer: wgpu::Buffer,
+    pub start_time: Instant,
     pub white_texture: wgpu::Texture,
     pub white_texture_view: wgpu::TextureView,
     pub sampler: wgpu::Sampler,
@@ -119,11 +143,15 @@ impl State {
 
         // Create resources
         
-        // 1. Uniform Buffer (Screen Size)
-        let screen_size_data = [size.width as f32, size.height as f32];
-        let screen_size_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Screen Size Buffer"),
-            contents: bytemuck::cast_slice(&screen_size_data),
+        // 1. Uniform Buffer (Globals)
+        let globals_data = Globals {
+            screen_size: [size.width as f32, size.height as f32],
+            time: 0.0,
+            _pad: 0.0,
+        };
+        let globals_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Globals Buffer"),
+            contents: bytemuck::cast_slice(&[globals_data]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -185,7 +213,7 @@ impl State {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&white_texture_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: screen_size_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: globals_buffer.as_entire_binding() },
             ],
             label: Some("diffuse_bind_group"),
         });
@@ -204,6 +232,7 @@ impl State {
                 wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 }, // position
                 wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 8, shader_location: 1 }, // color
                 wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 24, shader_location: 2 }, // uv
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 32, shader_location: 3 }, // effect_flags
             ],
         };
 
@@ -264,11 +293,13 @@ impl State {
             event_handlers: HashMap::new(),
             hovered_component: None,
             cursor_pos: None,
+            particles: Vec::new(),
             layout_rects: Vec::new(),
             
             // Resources
             bind_group,
-            screen_size_buffer,
+            globals_buffer,
+            start_time: Instant::now(),
             white_texture,
             white_texture_view,
             sampler,
@@ -349,7 +380,7 @@ impl State {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: self.screen_size_buffer.as_entire_binding(),
+                    resource: self.globals_buffer.as_entire_binding(),
                 },
             ],
             label: Some(&format!("bind_group_{}", path)),
@@ -360,9 +391,20 @@ impl State {
     
     pub fn update_cursor(&mut self, x: f32, y: f32) {
         self.cursor_pos = Some((x, y));
+        self.cursor_pos = Some((x, y));
         self.check_hover();
     }
     
+    pub fn handle_click(&self, x: f32, y: f32) -> Option<String> {
+         // Iterate backwards (front-to-back)
+         for (lx, ly, w, h, label) in self.layout_rects.iter().rev() {
+             if x >= *lx && x <= lx + w && y >= *ly && y <= ly + h {
+                 return Some(label.clone());
+             }
+         }
+         None
+    }
+
     pub fn check_hover(&mut self) {
         if let Some((mx, my)) = self.cursor_pos {
              let mut found_hover: Option<String> = None;
@@ -404,20 +446,70 @@ impl State {
             self.surface.configure(&self.device, &self.config);
             
             // Update Uniform
-            let screen_size_data = [new_size.width as f32, new_size.height as f32];
-            self.queue.write_buffer(&self.screen_size_buffer, 0, bytemuck::cast_slice(&screen_size_data));
+            let globals_data = Globals {
+                screen_size: [new_size.width as f32, new_size.height as f32],
+                time: self.start_time.elapsed().as_secs_f32(),
+                _pad: 0.0,
+            };
+            self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::cast_slice(&[globals_data]));
         }
     }
 
     pub fn update(&mut self) {
         let _updates = self.animation_controller.update();
-        // In a real implementation, we would apply _updates to the Component Tree here.
-        // For Phase 11 prototype, we might just repaint, assuming LayoutEngine reads animated values
-        // if we hook them up. 
-        // Or, we render using values from AnimationController if they match target_id.
+        
+        // Update Particles
+        let mut alive_particles = Vec::new();
+        for mut p in self.particles.drain(..) {
+            p.pos[0] += p.vel[0];
+            p.pos[1] += p.vel[1];
+            p.life -= p.decay;
+            p.size *= 0.95; // Shrink
+            
+            if p.life > 0.0 {
+                alive_particles.push(p);
+            }
+        }
+        self.particles = alive_particles;
+    }
+    
+    pub fn spawn_particles(&mut self, x: f32, y: f32, count: usize, color: [f32; 4]) {
+        // Simple LCG PRNG for now if rand not available
+        let mut seed = self.start_time.elapsed().as_nanos() as u64;
+        
+        for _ in 0..count {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let r1 = (seed >> 32) as f32 / 4294967296.0;
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let r2 = (seed >> 32) as f32 / 4294967296.0;
+            
+            let angle = r1 * std::f32::consts::PI * 2.0;
+            let speed = r2 * 5.0 + 2.0;
+            
+            let vel_x = angle.cos() * speed;
+            let vel_y = angle.sin() * speed;
+            
+            self.particles.push(Particle {
+                pos: [x, y],
+                vel: [vel_x, vel_y],
+                color,
+                size: 10.0 + r2 * 10.0,
+                life: 1.0,
+                decay: 0.02 + r1 * 0.03,
+            });
+        }
     }
 
     pub fn render(&mut self, ui_root: Option<&Value>) -> Result<(), wgpu::SurfaceError> {
+        // Update Time Uniform
+        let time = self.start_time.elapsed().as_secs_f32();
+        let globals_data = Globals {
+            screen_size: [self.size.width as f32, self.size.height as f32],
+            time,
+            _pad: 0.0,
+        };
+        self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::cast_slice(&[globals_data]));
+
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -459,7 +551,7 @@ impl State {
                 }
                 
                 // Draw Full Screen
-                self.renderer.draw_image(0.0, 0.0, self.size.width as f32, self.size.height as f32, &path);
+                self.renderer.draw_image(0.0, 0.0, self.size.width as f32, self.size.height as f32, &path, 0);
             }
         }
 
@@ -475,26 +567,34 @@ impl State {
         for (x, y, w, h, val) in layout_rects {
             match val {
                 Value::Image(path) => {
-                     // Draw Image
-                     self.renderer.draw_image(x, y, w, h, &path);
+                     // Draw Image (TODO: Support effects on raw images?)
+                     self.renderer.draw_image(x, y, w, h, &path, 0);
                 }
                 Value::Component { style, ty: _, label, .. } => {
-                    // Check for animated properties
                     let mut shadow_depth = 0.0;
                     let mut color_override = None;
-                    
+                    let mut effect_flags = 0;
+
                     if let Some(l) = label {
                          if let Some(d) = self.animation_controller.get_value(l.as_str(), "shadow") {
                              shadow_depth = d;
                          }
                          if let Some(d) = self.animation_controller.get_value(l.as_str(), "背景") {
-                             // Interpolate White -> Cyan based on d (0.0 -> 1.0)
-                             // White: [1.0, 1.0, 1.0]
-                             // Cyan: [0.0, 1.0, 1.0] (roughly)
                              let r = 1.0 - d.min(1.0).max(0.0);
                              let g = 1.0;
                              let b = 1.0;
                              color_override = Some([r, g, b, 1.0]);
+                         }
+                         
+                         // Effect Flags
+                         if let Some(val) = self.animation_controller.get_value(l.as_str(), "glow") {
+                             if val > 0.5 { effect_flags |= 1; }
+                         }
+                         if let Some(val) = self.animation_controller.get_value(l.as_str(), "shake") {
+                             if val > 0.5 { effect_flags |= 2; }
+                         }
+                         if let Some(val) = self.animation_controller.get_value(l.as_str(), "rainbow") {
+                             if val > 0.5 { effect_flags |= 4; }
                          }
                     }
 
@@ -513,24 +613,34 @@ impl State {
                     self.renderer.draw_shadow_rect(x, y, w, h, 10.0, shadow_depth);
                     
                     // Draw Component
-                    self.renderer.draw_rounded_rect(x, y, w, h, 10.0, color);
+                    self.renderer.draw_rounded_rect(x, y, w, h, 10.0, color, effect_flags);
                     
                     // Label text? (Not implemented in renderer yet, passing rect is needed)
                 }
-                Value::Image(_) => {
-                    // Placeholder for image (gray box)
-                    self.renderer.draw_rect(x, y, w, h, [0.8, 0.8, 0.8, 1.0]);
-                }
                 Value::String(s) => {
-                     // Text logic (Draw placeholder rect for text area debugging)
-                     // self.renderer.draw_rect(x, y, w, h, [0.0, 0.0, 0.0, 0.1]);
-                     // Draw text using Glyphon (future)
+                     // Draw Text
+                     self.renderer.draw_text(&s, x, y, [0.0, 0.0, 0.0, 1.0], 24.0); // Black text, size 24
                 }
                 _ => {}
             }
         }
         
-        let (vertex_buf, index_buf, index_count) = self.renderer.get_buffers(&self.device);
+        // Render Particles (on top of UI)
+        for p in &self.particles {
+            let alpha = p.life;
+            let color = [p.color[0], p.color[1], p.color[2], p.color[3] * alpha];
+            self.renderer.draw_rounded_rect(
+                p.pos[0] - p.size/2.0, 
+                p.pos[1] - p.size/2.0, 
+                p.size, 
+                p.size, 
+                p.size/2.0, 
+                color, 
+                1 // Glow effect for particles!
+            );
+        }
+        
+        let (vertex_buf, index_buf, _index_count) = self.renderer.get_buffers(&self.device);
 
         // 3. Render Pass
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -582,6 +692,9 @@ impl State {
                     _render_pass.draw_indexed(range, 0, 0..1); 
                 }
             }
+            
+            // Render Text
+            self.renderer.render_text(&mut _render_pass, &self.device, &self.queue, self.size.width, self.size.height);
         }
 
     

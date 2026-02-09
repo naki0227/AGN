@@ -134,7 +134,7 @@ impl Compiler {
     }
     
     /// Wasmコンパイル (トランスパイル + wasm-pack)
-    fn compile_wasm(&self, program: &crate::parser::Program, output_name: &str) -> Result<CompileResult, CompileError> {
+    fn compile_wasm(&self, program: &crate::parser::Program, _output_name: &str) -> Result<CompileResult, CompileError> {
         use crate::web_generator::WebGenerator;
         
         let web_gen = WebGenerator::new(&self.output_dir);

@@ -1,0 +1,22 @@
+// Umeda Underground Verification Script
+// GPS-denied environment using RSSI for Proximity
+
+// 1. Proximity Detection (RSSI > -70dBm)
+on Event(ProximityDetected) from User to Me {
+    // Check signal strength (simulated property)
+    // -70dBm is roughly within 10 meters in open space, less in crowded areas
+    if User.rssi > -70 then
+        // Be patient: 5 seconds of contact required
+        if User.duration > 5 then
+            bond(Me, User) を 深くする
+            show 想像する("地下街の雑踏の中で、" + User + " とすれ違いました。")
+        end
+    end
+}
+
+// 2. Connection Loss (Simulate fading signal)
+on Event(ConnectionLost) from User to Me {
+    // Optional: Degrade temporary bond if too short?
+    // For now, just log.
+    show User + " との信号が途切れました。"
+}

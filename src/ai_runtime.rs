@@ -80,6 +80,20 @@ impl AiRuntime {
         self.call_gemini(&prompt).await
     }
 
+    /// 物語を生成 (Nue)
+    pub async fn generate_story(&self, context: &str) -> Result<String, AiError> {
+        if !self.enabled {
+            return Ok(format!("[物語: {}...]", &context.chars().take(20).collect::<String>()));
+        }
+
+        let prompt = format!(
+            "以下のコンテキストに基づいて、心温まる短い物語（140文字以内）を生成してください。日本語でお願いします。\n\nコンテキスト: {}",
+            context
+        );
+        
+        self.call_gemini(&prompt).await
+    }
+
     /// Gemini APIを呼び出し
     /// Gemini APIを呼び出し (Native)
     #[cfg(not(target_arch = "wasm32"))]
@@ -177,6 +191,7 @@ impl AiRuntime {
                  let target = option.unwrap_or_else(|| "英語".to_string());
                  self.translate(input, &target).await
             },
+            "想像する" | "imagine" => self.generate_story(input).await,
             _ => Err(AiError::RequestFailed(format!("Unknown AI verb: {}", verb))),
         }
     }

@@ -12,6 +12,18 @@ pub enum Expr {
     // Eeyo: 空間・時間型 (Phase 13)
     Distance { value: f64, unit: String },
     Duration { value: f64, unit: String },
+    // AGN 2.0: Property Access (User.Toku)
+    PropertyAccess {
+        target: Box<Expr>,
+        property: String,
+    },
+    // AGN 2.0: Bond (Bond between two entities)
+    Bond(Box<Expr>, Box<Expr>),
+    // AGN 2.0: Call (Action/Rule call as expression)
+    Call {
+        name: String,
+        args: Vec<Expr>,
+    },
 }
 
 /// 条件式
@@ -23,6 +35,10 @@ pub enum Condition {
     // Eeyo: 空間条件
     Nearer(Expr),   // より近い
     Farther(Expr),  // より遠い
+    // AGN 2.0: 関係性条件
+    HasBond(Expr, Expr), // A と B の間に 絆 がある
+    // Truthy check
+    Truthy(Expr),
 }
 
 /// 空間検索フィルター
@@ -35,21 +51,21 @@ pub struct SpatialFilter {
 /// 文（実行単位）
 #[derive(Debug, Clone)]
 pub enum Statement {
-    /// 代入文: [名詞] は [値] だ / let X = 10
-    Assignment { name: String, value: Expr },
+    /// 代入文: [ターゲット] は [値] だ / let X = 10
+    Assignment { target: Expr, value: Expr },
     /// アセットロード: [ターゲット] は [パス] を 読み込む
     LoadAsset {
-        target: String,
+        target: Expr,
         path: Expr,
     },
-    /// UIコンポーネント定義: [名前] は [スタイル] な [コンポーネント] だ
+    /// UIコンポーネント定義: [ターゲット] は [スタイル] な [コンポーネント] だ
     ComponentDefine {
-        target: String,
+        target: Expr,
         style: String,
         component: String,
     },
-    /// 二項演算: [名詞] に [値] を [動詞] / add [値] to [名詞]
-    BinaryOp { target: String, operand: Expr, verb: String },
+    /// 二項演算: [ターゲット] に [値] を [動詞] / add [値] to [ターゲット]
+    BinaryOp { target: Expr, operand: Expr, verb: String },
     /// 単項関数: [値] を [動詞] / show [値]
     UnaryOp { operand: Expr, verb: String },
     /// 非同期実行: [値] を 並列で [動詞]
@@ -65,9 +81,9 @@ pub enum Statement {
         count: Expr,
         body: Vec<Statement>,
     },
-    /// AI操作: [結果] は [入力] を [AI動詞] / Result is summarize Input
+    /// AI操作: [ターゲット] は [入力] を [オプション] に [動詞]
     AiOp {
-        result: String,
+        result: Expr,
         input: Expr,
         verb: String,
         options: Option<Expr>,
@@ -76,10 +92,17 @@ pub enum Statement {
     ScreenOp {
         operand: Expr,
     },
-    /// イベントハンドラ: on [名詞] click ... end / [名詞] を 押したとき ... おわり
+    /// イベントハンドラ: on [ターゲット] click ... end / [ターゲット] を 押したとき ... おわり
     EventHandler {
-        target: String,
+        target: Expr,
         event: String,
+        body: Vec<Statement>,
+    },
+    /// Phase 15: Event Listener: on Event(Type) from A to B
+    EventListener {
+        event_type: String,
+        from_var: Option<String>,
+        to_var: Option<String>,
         body: Vec<Statement>,
     },
     /// 遅延実行: [時間] 後 に ... おわり / after [Time] ... end
@@ -87,30 +110,30 @@ pub enum Statement {
         duration: Expr,
         body: Vec<Statement>,
     },
-    /// アニメーション: [時間] かけて [名詞] の [プロパティ] を [値] に する
+    /// アニメーション: [時間] かけて [ターゲット] の [プロパティ] を [値] に する
     AnimateStatement {
         duration: Expr,
-        target: String,
+        target: Expr,
         property: String, // "色", "サイズ", "影"
         value: Expr,
     },
     
     // === Phase 10: Vector Graphics & UI ===
-    /// ブロック: [名詞] の 中 に ... おわり
+    /// ブロック: [ターゲット] の 中 に ... おわり
     Block {
-        target: String,
+        target: Expr,
         body: Vec<Statement>,
     },
     /// レイアウト: [リスト] を [方向] に 置く
     Layout {
-        target: String,
+        target: Expr,
         direction: LayoutDirection,
     },
     
     // === Eeyo: 空間・通信 (Phase 13) ===
     /// 空間検索: [結果] は [距離] より 近い 人 で [条件] な 人 を 探す
     SpatialSearch {
-        result: String,
+        result: Expr,
         max_distance: Expr,
         filters: Vec<SpatialFilter>,
     },
@@ -120,15 +143,43 @@ pub enum Statement {
         duration: Option<Expr>,
         payload: Vec<(String, Expr)>,
     },
-    /// 通知: [対象] に [メッセージ] を 通知する
+    /// 助けを求める / 通知: [ターゲット] に [メッセージ] を 通知する
     Notify {
         target: Expr,
         message: Expr,
     },
-    /// 徳加算: [ユーザー] に 徳 を [量] 加算する
+    /// 徳の付与: [ターゲット] に [量] だけ 徳 を 加算する
     TokuAccrue {
         target: Expr,
         amount: Expr,
+    },
+
+    // === AGN 2.0 (Social Layer) ===
+    /// ルール定義: ルール [名前] ... おわり
+    RuleDefinition {
+        name: String,
+        body: Vec<Statement>,
+    },
+    /// アクション定義: アクション [名前] ... おわり
+    ActionDefinition {
+        name: String,
+        params: Vec<String>,
+        body: Vec<Statement>,
+    },
+    /// 変数更新 (再代入): [式] を [値] に 更新する / 増やす / 減らす
+    VariableUpdate {
+        target: Expr, // Can be PropertyAccess
+        value: Expr,
+        verb: String, // "更新する", "増やす", "減らす"
+    },
+    /// リターン: 結果 を [式] とする
+    ReturnStatement {
+        value: Expr,
+    },
+    /// アクション呼び出し: 徳を送る(送信者, 受信者, 10)
+    ActionCall {
+        name: String,
+        args: Vec<Expr>,
     },
 }
 
@@ -172,30 +223,106 @@ impl Parser {
         }
     }
 
-    fn parse_expr(&self, token: &Token) -> Option<Expr> {
-        match token {
-            Token::Number(n) => Some(Expr::Number(*n)),
-            Token::String(s) => Some(Expr::String(s.clone())),
-            Token::Noun(name) => Some(Expr::Variable(name.clone())),
-            // Eeyo: 空間・時間リテラル
-            Token::Distance { value, unit } => Some(Expr::Distance { 
-                value: *value, 
-                unit: unit.clone() 
-            }),
-            Token::Duration { value, unit } => Some(Expr::Duration { 
-                value: *value, 
-                unit: unit.clone() 
-            }),
-            _ => None,
+    fn parse_expression(&mut self) -> Result<Expr, String> {
+        let mut left = self.parse_primary()?;
+        
+        // Postfix operators (Property Access)
+        while matches!(self.current(), Token::Dot) {
+            self.advance(); // skip dot
+            
+            let property = match self.current() {
+                Token::Noun(n) => n.clone(),
+                Token::KeywordToku => "徳".to_string(),
+                Token::KeywordRank => "ランク".to_string(),
+                Token::KeywordBond => "絆".to_string(),
+                _ => return Err(format!("Expected property name after dot, got {:?}", self.current())),
+            };
+            self.advance();
+            
+            left = Expr::PropertyAccess {
+                target: Box::new(left),
+                property,
+            };
         }
+        
+        Ok(left)
+    }
+
+    fn parse_primary(&mut self) -> Result<Expr, String> {
+        let token = self.current().clone();
+        
+        let expr = match token {
+            Token::Number(n) => {
+                self.advance();
+                Expr::Number(n)
+            },
+            Token::String(s) => {
+                self.advance();
+                Expr::String(s)
+            },
+            Token::Noun(name) => {
+                self.advance();
+                if matches!(self.current(), Token::LParen) {
+                    self.advance(); // skip (
+                    let mut args = Vec::new();
+                    loop {
+                        if matches!(self.current(), Token::RParen) {
+                            self.advance();
+                            break;
+                        }
+                        args.push(self.parse_expression()?);
+                        
+                        if matches!(self.current(), Token::Comma) {
+                            self.advance();
+                        } else if !matches!(self.current(), Token::RParen) {
+                            return Err(format!("Expected ',' or ')' in call, got {:?}", self.current()));
+                        }
+                    }
+                    Expr::Call { name: name.clone(), args }
+                } else {
+                    Expr::Variable(name.clone())
+                }
+            },
+            Token::Distance { value, unit } => {
+                self.advance();
+                Expr::Distance { value, unit }
+            },
+            Token::Duration { value, unit } => {
+                self.advance();
+                Expr::Duration { value, unit }
+            },
+            Token::KeywordBond => {
+                // bond(Expr, Expr)
+                self.advance(); // skip bond
+                if !matches!(self.current(), Token::LParen) {
+                    return Err(format!("Expected '(' after bond, got {:?}", self.current()));
+                }
+                self.advance(); // skip (
+                
+                let left = self.parse_expression()?;
+                
+                if !matches!(self.current(), Token::Comma) {
+                    return Err(format!("Expected ',' in bond(), got {:?}", self.current()));
+                }
+                self.advance(); // skip ,
+                
+                let right = self.parse_expression()?;
+                
+                if !matches!(self.current(), Token::RParen) {
+                    return Err(format!("Expected ')' after bond(), got {:?}", self.current()));
+                }
+                self.advance(); // skip )
+                
+                Expr::Bond(Box::new(left), Box::new(right))
+            }
+            _ => return Err(format!("Expected expression, got {:?}", token)),
+        };
+        
+        Ok(expr)
     }
 
     fn current_to_expr(&mut self) -> Result<Expr, String> {
-        let token = self.current().clone();
-        let expr = self.parse_expr(&token)
-            .ok_or_else(|| format!("Expected expression, got {:?}", token))?;
-        self.advance();
-        Ok(expr)
+        self.parse_expression()
     }
 
     pub fn parse(&mut self) -> Result<Program, String> {
@@ -217,6 +344,32 @@ impl Parser {
 
     fn parse_statement(&mut self) -> Result<Statement, String> {
         self.skip_newlines();
+
+        // AGN 2.0: Rule Definition
+        if matches!(self.current(), Token::KeywordRule) {
+            return self.parse_rule_definition();
+        }
+        
+        // AGN 2.0: Action Definition
+        if matches!(self.current(), Token::KeywordAction) {
+            return self.parse_action_definition();
+        }
+        
+        // AGN 2.0: Event Listener
+        if matches!(self.current(), Token::KeywordOn) {
+            // Check if next is Event keyword
+            if matches!(self.peek(1), Token::KeywordEvent) {
+                return self.parse_event_listener();
+            } else {
+                // Regular UI event handler (on Button click)
+                return self.parse_event_handler();
+            }
+        }
+        
+        // AGN 2.0: English Action Commands (increase, decrease, update)
+        if matches!(self.current(), Token::KeywordIncrease | Token::KeywordDecrease | Token::KeywordUpdate) {
+             return self.parse_english_action_command();
+        }
         
         // === English SVO Patterns ===
         
@@ -266,6 +419,12 @@ impl Parser {
         // 日本語: [名詞] は [値] だ / [パス] を 読み込む / [スタイル] な [コン] だ
         if matches!(self.current(), Token::Noun(_)) && matches!(self.peek(1), Token::ParticleWa) {
             return self.parse_assignment();
+        }
+        
+        // AGN 2.0: Property Access or Function Lead Start (User.Toku ... / bond(...) ...)
+        if matches!(self.current(), Token::Noun(_) | Token::KeywordBond | Token::KeywordRank) 
+           && (matches!(self.peek(1), Token::Dot | Token::LParen)) {
+             return self.parse_expr_statement();
         }
 
         // 日本語: [名詞] に [値] を [動詞]
@@ -424,11 +583,7 @@ impl Parser {
         }
         self.advance(); // skip to
         
-        let target = match self.current() {
-            Token::Noun(n) => n.clone(),
-            _ => return Err("Expected variable name".to_string()),
-        };
-        self.advance(); // skip target
+        let target = self.parse_expression()?;
         
         // Normalize to Japanese verb
         let normalized_verb = match verb.as_str() {
@@ -446,7 +601,7 @@ impl Parser {
         // let X = 10
         self.advance(); // skip let
         
-        let name = match self.current() {
+        let _name = match self.current() {
             Token::Noun(n) => n.clone(),
             _ => return Err("Expected variable name".to_string()),
         };
@@ -457,9 +612,16 @@ impl Parser {
             self.advance();
         }
         
+        let target = self.parse_expression()?;
+        
+        if !matches!(self.current(), Token::KeywordEquals) {
+            return Err("Expected '='".to_string());
+        }
+        self.advance(); // skip =
+        
         let value = self.current_to_expr()?;
         
-        Ok(Statement::Assignment { name, value })
+        Ok(Statement::Assignment { target, value })
     }
     
     fn parse_english_is_assignment(&mut self) -> Result<Statement, String> {
@@ -478,7 +640,7 @@ impl Parser {
         
         let value = self.current_to_expr()?;
         
-        Ok(Statement::Assignment { name, value })
+        Ok(Statement::Assignment { target: Expr::Variable(name), value })
     }
     
     fn parse_english_repeat(&mut self) -> Result<Statement, String> {
@@ -502,29 +664,59 @@ impl Parser {
     fn parse_if_statement(&mut self) -> Result<Statement, String> {
         // if X equals Y then ... end
         // もし X と等しい Y ならば ... おわり
+        // もし A と B の間に 絆 がある ならば ...
         self.advance(); // skip if / もし
         
-        // Parse condition
-        let left = self.current_to_expr()?;
-        
-        // Expect comparison operator
-        let condition = match self.current() {
-            Token::KeywordEquals => {
+        let condition = if matches!(self.peek(1), Token::ParticleTo) {
+            // 日本語絆構文: [Expr] と [Expr] ... 絆 がある
+            let left = self.parse_expression()?;
+            self.advance(); // skip と
+            let right = self.parse_expression()?;
+            
+            // Skip "の間に" etc.
+            while matches!(self.current(), Token::ParticleNo | Token::KeywordInside | Token::KeywordBetween | Token::ParticleNi | Token::KeywordPerson) {
                 self.advance();
-                let right = self.current_to_expr()?;
-                Condition::Equals(left, right)
             }
-            Token::KeywordGreaterThan => {
-                self.advance();
-                let right = self.current_to_expr()?;
-                Condition::GreaterThan(left, right)
+            
+            if !matches!(self.current(), Token::KeywordBond) {
+                return Err(format!("Expected '絆' in relationship condition, got {:?}", self.current()));
             }
-            Token::KeywordLessThan => {
-                self.advance();
-                let right = self.current_to_expr()?;
-                Condition::LessThan(left, right)
+            self.advance(); // skip 絆
+            
+            if matches!(self.current(), Token::KeywordAre | Token::KeywordIs | Token::ParticleDa | Token::ParticleGa) {
+                self.advance(); // consume がある / だ
+                if matches!(self.current(), Token::KeywordAre) {
+                    self.advance(); // consume "ある" if "が" "ある"
+                }
             }
-            _ => return Err(format!("Expected comparison operator, got {:?}", self.current())),
+            
+            Condition::HasBond(left, right)
+        } else {
+            // Standard Condition: left OP right
+            let left = self.current_to_expr()?;
+            
+            match self.current() {
+                Token::KeywordEquals => {
+                    self.advance();
+                    let right = self.current_to_expr()?;
+                    Condition::Equals(left, right)
+                }
+                Token::KeywordGreaterThan => {
+                    self.advance();
+                    let right = self.current_to_expr()?;
+                    Condition::GreaterThan(left, right)
+                }
+                Token::KeywordLessThan => {
+                    self.advance();
+                    let right = self.current_to_expr()?;
+                    Condition::LessThan(left, right)
+                }
+                Token::KeywordThen | Token::KeywordEnd | Token::Newline | Token::EOF => {
+                    // No operator: Truthy check (e.g. `if bond(A, B) then`)
+                    Condition::Truthy(left)
+                }
+                _ => return Err(format!("Expected comparison operator, got {:?}", self.current())),
+            }
         };
         
         // Expect "then" / "ならば"
@@ -614,7 +806,7 @@ impl Parser {
         // Parse body until "end"
         let body = self.parse_block_until_end()?;
         
-        Ok(Statement::EventHandler { target, event, body })
+        Ok(Statement::EventHandler { target: Expr::Variable(target), event, body })
     }
     
     fn parse_show_to_screen(&mut self) -> Result<Statement, String> {
@@ -713,7 +905,7 @@ impl Parser {
         // Parse body
         let body = self.parse_block_until_end()?;
         
-        Ok(Statement::Block { target, body })
+        Ok(Statement::Block { target: Expr::Variable(target), body })
     }
 
     fn parse_layout(&mut self) -> Result<Statement, String> {
@@ -750,7 +942,7 @@ impl Parser {
             _ => return Err("Expected '置く'".to_string()),
         };
         
-        Ok(Statement::Layout { target, direction })
+        Ok(Statement::Layout { target: Expr::Variable(target), direction })
     }
 
     // === Phase 11: Animation & Event Parsers ===
@@ -815,7 +1007,7 @@ impl Parser {
 
         Ok(Statement::AnimateStatement { 
             duration: Expr::Number(duration), 
-            target: "Unknown".to_string(), // Implicit target not supported in this legacy parser path
+            target: Expr::Variable("Unknown".to_string()),
             property, 
             value: target_value 
         })
@@ -849,21 +1041,17 @@ impl Parser {
         let body = self.parse_block_until_end()?;
 
         Ok(Statement::EventHandler { 
-            target: "self".to_string(), // Implicit target (current component)
+            target: Expr::Variable("self".to_string()), // Implicit target (current component)
             event: "hover".to_string(), 
             body 
         })
     }
 
     fn parse_object_event(&mut self) -> Result<Statement, String> {
-        // [名詞] を 押したとき / 動かしたとき
-        let target = match self.current() {
-            Token::Noun(n) => n.clone(),
-            _ => return Err("Expected target noun".to_string()),
-        };
-        self.advance(); // skip target
+        // [式] を 押したとき / 動かしたとき
+        let target = self.parse_expression()?;
         
-        // Expect "を" - checked by dispatcher
+        // Expect "を"
         if !matches!(self.current(), Token::ParticleWo) {
              return Err("Expected 'を'".to_string());
         }
@@ -884,25 +1072,20 @@ impl Parser {
     // === Japanese SOV Parsers (existing) ===
     
     fn parse_assignment(&mut self) -> Result<Statement, String> {
-        // [名詞] は ...
-        let name = match self.current() {
-            Token::Noun(n) => n.clone(),
-            _ => return Err("Expected noun".to_string()),
-        };
-        self.advance();
-
+        // [式] は [値] だ
+        let target = self.parse_expression()?;
+        
         if !matches!(self.current(), Token::ParticleWa) {
             return Err("Expected 'は'".to_string());
         }
-        self.advance();
-
-        let expr = self.current_to_expr()?;
+        self.advance(); // skip は
+      let expr = self.current_to_expr()?;
 
         match self.current() {
             Token::ParticleDa => {
                 // [値] だ
                 self.advance();
-                Ok(Statement::Assignment { name, value: expr })
+                Ok(Statement::Assignment { target, value: expr })
             }
             Token::ParticleWo => {
                 // [パス] を 読み込む OR [値] を 翻訳する/要約する
@@ -910,14 +1093,14 @@ impl Parser {
                 match self.current() {
                     Token::Verb(v) if v == "読み込む" => {
                         self.advance();
-                        Ok(Statement::LoadAsset { target: name, path: expr })
+                        Ok(Statement::LoadAsset { target: target.clone(), path: expr })
                     }
-                    Token::Verb(v) if v == "翻訳する" || v == "要約する" => {
+                    Token::Verb(v) if v == "翻訳する" || v == "要約する" || v == "想像する" => {
                         // AI verb in assignment: 結果 は テキスト を 翻訳する
                         let verb = v.clone();
                         self.advance();
                         Ok(Statement::AiOp { 
-                            result: name, 
+                            result: target.clone(), 
                             input: expr, 
                             verb,
                             options: None,
@@ -937,7 +1120,7 @@ impl Parser {
                                 let verb = v.clone();
                                 self.advance();
                                 Ok(Statement::AiOp { 
-                                    result: name, 
+                                    result: target.clone(), 
                                     input: expr, 
                                     verb, 
                                     options: Some(options_expr) 
@@ -971,7 +1154,7 @@ impl Parser {
                                           // But for now, treating Expr as style.
                     _ => return Err("Expected style variable or string".to_string()),
                 };
-                Ok(Statement::ComponentDefine { target: name, style, component })
+                    Ok(Statement::ComponentDefine { target: target.clone(), style, component })
             }
             Token::Noun(component) => {
                  // [スタイル] [コンポーネント] だ (implicit "な")
@@ -986,7 +1169,7 @@ impl Parser {
                         Expr::Variable(s) => s,
                         _ => return Err("Expected style variable".to_string()),
                     };
-                    Ok(Statement::ComponentDefine { target: name, style, component })
+                    Ok(Statement::ComponentDefine { target: target.clone(), style, component })
                  } else {
                       // Maybe it was just an assignment value that happened to mean something else?
                       // But current logic for Assignment is consume Value then expect Da.
@@ -1000,11 +1183,7 @@ impl Parser {
     }
 
     fn parse_binary_op(&mut self) -> Result<Statement, String> {
-        let target = match self.current() {
-            Token::Noun(n) => n.clone(),
-            _ => return Err("Expected noun".to_string()),
-        };
-        self.advance();
+        let target = self.parse_expression()?;
 
         if !matches!(self.current(), Token::ParticleNi) {
             return Err("Expected 'に'".to_string());
@@ -1031,16 +1210,13 @@ impl Parser {
         // [operand] を [target] に [verb]
         let operand = self.current_to_expr()?;
         
-        // Skip "を"
+        if !matches!(self.current(), Token::ParticleWo) {
+            return Err("Expected 'を'".to_string());
+        }
         self.advance();
         
         // Get target
-        let target = match self.current() {
-            Token::Noun(n) => n.clone(),
-            Token::ScreenNoun => "Screen".to_string(),
-            _ => return Err("Expected target noun".to_string()),
-        };
-        self.advance();
+        let target = self.parse_expression()?;
         
         // Skip "に"
         if !matches!(self.current(), Token::ParticleNi) {
@@ -1124,14 +1300,8 @@ impl Parser {
         self.advance();
         
         if let Some(tgt) = target {
-             // If target is present, allow it to be processed as BinaryOp or ScreenOp
-             if tgt.starts_with("Screen") && verb == "表示する" {
-                  // Special case for ScreenOp?
-                  // Actually BinaryOp { target, operand, verb } works if Interpreter handles it.
-                  Ok(Statement::BinaryOp { target: tgt, operand, verb })
-             } else {
-                  Ok(Statement::BinaryOp { target: tgt, operand, verb })
-             }
+             let target_expr = Expr::Variable(tgt);
+             Ok(Statement::BinaryOp { target: target_expr, operand, verb })
         } else if is_async {
             Ok(Statement::AsyncOp { operand, verb })
         } else {
@@ -1163,11 +1333,7 @@ impl Parser {
              self.advance(); // skip かけて (KeywordOver)
              
              // [Target] の
-             let target = match self.current() {
-                 Token::Noun(n) => n.clone(),
-                 _ => return Err("Expected target noun for animation".to_string()),
-             };
-             self.advance();
+             let target = self.parse_expression()?;
              
              if !matches!(self.current(), Token::ParticleNo) {
                  return Err("Expected 'の' after target".to_string());
@@ -1177,7 +1343,6 @@ impl Parser {
              // [Prop] を
              let property = match self.current() {
                  Token::Noun(n) => n.clone(),
-                 // Allow known props if they are keywords? For now assume Noun
                  _ => return Err("Expected property noun (色, サイズ, 影)".to_string()),
              };
              self.advance();
@@ -1189,28 +1354,294 @@ impl Parser {
              
              // [Value] に
              let value = self.current_to_expr()?;
-
              
              if !matches!(self.current(), Token::ParticleNi) {
                  return Err("Expected 'に' after value".to_string());
              }
              self.advance(); // skip に
-
+             
              // する
              if !matches!(self.current(), Token::Verb(v) if v == "する") && !matches!(self.current(), Token::KeywordChange) {
                   return Err("Expected 'する' at end of animation".to_string());
              }
              self.advance(); // skip する
              
-             Ok(Statement::AnimateStatement {
-                 duration,
-                 target,
-                 property,
-                 value,
-             })
+             Ok(Statement::AnimateStatement { duration, target, property, value })
         } else {
-             Err("Expected '後' or 'かけて' after seconds".to_string())
+             Err("Expected '後' (after) or 'かけて' (over) after Time".to_string())
         }
+    }
+
+    fn parse_expr_statement(&mut self) -> Result<Statement, String> {
+        let expr = self.parse_expression()?;
+
+        // Case 1: Binary (Expr に Value を Verb)
+        if matches!(self.current(), Token::ParticleNi) {
+            self.advance(); // skip に
+            
+            let operand = self.parse_expression()?;
+            
+            if !matches!(self.current(), Token::ParticleWo) {
+                 return Err("Expected 'を'".to_string());
+            }
+            self.advance(); // skip を
+            
+            let verb = match self.current() {
+                Token::Verb(v) => v.clone(),
+                Token::KeywordNotify => "通知する".to_string(),
+                Token::KeywordAccrue | Token::KeywordIncrease => "増やす".to_string(),
+                Token::KeywordDecrease => "減らす".to_string(),
+                Token::KeywordDeepen => "深くする".to_string(),
+                _ => return Err("Expected verb".to_string()),
+            };
+            self.advance();
+            
+            if verb == "通知する" {
+                 return Ok(Statement::Notify { target: expr, message: operand });
+            }
+            
+            // Try to use BinaryOp if target is simple variable
+            if let Expr::Variable(name) = &expr {
+                 return Ok(Statement::BinaryOp { target: Expr::Variable(name.clone()), operand, verb });
+            }
+            
+            // Otherwise use VariableUpdate (for PropertyAccess etc)
+            // e.g. User.Toku に 5 を 加算する -> VariableUpdate { target, value=5, verb="増やす" }
+            return Ok(Statement::VariableUpdate { 
+                target: expr, 
+                value: operand, 
+                verb 
+            });
+        }
+        
+        // Case 2: Unary/Async (Expr を Verb)
+        if matches!(self.current(), Token::ParticleWo) {
+             self.advance(); // skip を
+             
+             // Check for Variable Update / Unary Op
+             let verb = match self.current() {
+                 Token::Verb(v) => v.clone(),
+                 Token::KeywordIncrease | Token::KeywordAccrue => "増やす".to_string(),
+                 Token::KeywordDecrease => "減らす".to_string(),
+                 Token::KeywordUpdate => "更新する".to_string(),
+                 Token::KeywordDeepen => "深くする".to_string(),
+                 _ => return Err("Expected verb".to_string()),
+             };
+             self.advance();
+             
+             if verb == "増やす" || verb == "減らす" || verb == "深くする" {
+                  return Ok(Statement::VariableUpdate {
+                      target: expr,
+                      value: Expr::Number(1.0),
+                      verb,
+                  });
+             }
+             
+             return Ok(Statement::UnaryOp { operand: expr, verb });
+        }
+        
+        // Case 3: Standalone Call
+        if let Expr::Call { name, args } = expr {
+             return Ok(Statement::ActionCall { name, args });
+        }
+        
+        Err(format!("Unexpected token after expression: {:?}", self.current()))
+    }
+    
+    // === AGN 2.0 Parsers ===
+    
+    fn parse_rule_definition(&mut self) -> Result<Statement, String> {
+        self.advance(); // skip ルール
+        
+        let name = match self.current() {
+            Token::Noun(n) => n.clone(),
+            _ => return Err("Expected rule name".to_string()),
+        };
+        self.advance();
+        
+        // Optional {
+        if matches!(self.current(), Token::LBrace) {
+            self.advance();
+            let body = self.parse_block_until_brace_end()?;
+            // RBrace consumed by helper
+            Ok(Statement::RuleDefinition { name, body })
+        } else {
+            let body = self.parse_block_until_end()?;
+            Ok(Statement::RuleDefinition { name, body })
+        }
+    }
+    
+    fn parse_action_definition(&mut self) -> Result<Statement, String> {
+        self.advance(); // skip アクション
+        
+        let name = match self.current() {
+            Token::Noun(n) => n.clone(),
+            Token::Verb(v) => v.clone(), // アクション名は動詞でもOK
+            _ => return Err("Expected action name".to_string()),
+        };
+        self.advance();
+        
+        // Params: ( P1, P2 )
+        let mut params = Vec::new();
+        if matches!(self.current(), Token::LParen) {
+            self.advance();
+            loop {
+                if matches!(self.current(), Token::RParen) {
+                    self.advance();
+                    break;
+                }
+                match self.current() {
+                    Token::Noun(n) => params.push(n.clone()),
+                    _ => return Err("Expected parameter name".to_string()),
+                }
+                self.advance();
+                
+                if matches!(self.current(), Token::Comma) {
+                    self.advance();
+                } else if !matches!(self.current(), Token::RParen) {
+                    return Err("Expected comma or closing parenthesis".to_string());
+                }
+            }
+        }
+        
+        // Optional {
+        let body = if matches!(self.current(), Token::LBrace) {
+            self.advance();
+            self.parse_block_until_brace_end()?
+        } else {
+            self.parse_block_until_end()?
+        };
+        
+        Ok(Statement::ActionDefinition { name, params, body })
+    }
+
+    // Phase 15: on Event(Type) from A to B { ... }
+    fn parse_event_listener(&mut self) -> Result<Statement, String> {
+        self.advance(); // skip 'on'
+        self.advance(); // skip 'Event' / 'イベント' （peekで確認済み）
+        
+        // (Type)
+        if !matches!(self.current(), Token::LParen) {
+            return Err("Expected '(' after Event".to_string());
+        }
+        self.advance(); // skip (
+        
+        let event_type = match self.current() {
+            Token::Noun(n) => n.clone(),
+            _ => return Err("Expected event type name".to_string()),
+        };
+        self.advance(); // skip type
+        
+        if !matches!(self.current(), Token::RParen) {
+            return Err("Expected ')' after event type".to_string());
+        }
+        self.advance(); // skip )
+        
+        // Optional: from A
+        let mut from_var = None;
+        if matches!(self.current(), Token::KeywordFrom | Token::KeywordBetween) {
+             self.advance(); // skip from
+             match self.current() {
+                 Token::Noun(n) => {
+                     from_var = Some(n.clone());
+                     self.advance();
+                 },
+                 _ => return Err("Expected variable name after from".to_string()),
+             }
+        }
+        
+        // Optional: to B
+        let mut to_var = None;
+        if matches!(self.current(), Token::KeywordTo) {
+             self.advance(); // skip to
+             match self.current() {
+                 Token::Noun(n) => {
+                     to_var = Some(n.clone());
+                     self.advance();
+                 },
+                 _ => return Err("Expected variable name after to".to_string()),
+             }
+        }
+        
+        // Block
+        let body = if matches!(self.current(), Token::LBrace) {
+            self.advance();
+            self.parse_block_until_brace_end()?
+        } else {
+            return Err("Expected '{' for event body".to_string());
+        };
+        
+        Ok(Statement::EventListener {
+            event_type,
+            from_var,
+            to_var,
+            body
+        })
+    }
+
+    // Phase 10: Events
+    fn parse_event_handler(&mut self) -> Result<Statement, String> {
+        self.advance(); // skip 'on'
+        
+        let target = self.current_to_expr()?;
+        
+        // click / Drag / ...
+        let event = if matches!(self.current(), Token::KeywordClick) {
+            "click".to_string()
+        } else if matches!(self.current(), Token::KeywordDrag) {
+            "drag".to_string()
+        } else if let Token::Verb(v) = self.current() {
+            v.clone()
+        } else {
+             return Err("Expected event name (click, drag, etc.)".to_string());
+        };
+        self.advance();
+        
+        // Block
+        let body = self.parse_block_until_end()?;
+        
+        Ok(Statement::EventHandler { target, event, body })
+    }
+    
+    fn parse_block_until_brace_end(&mut self) -> Result<Vec<Statement>, String> {
+        let mut statements = Vec::new();
+        loop {
+            self.skip_newlines();
+            if matches!(self.current(), Token::RBrace | Token::EOF) {
+                if matches!(self.current(), Token::RBrace) {
+                    self.advance();
+                }
+                break;
+            }
+            statements.push(self.parse_statement()?);
+        }
+        Ok(statements)
+    }
+
+    fn parse_english_action_command(&mut self) -> Result<Statement, String> {
+        let verb = match self.current() {
+            Token::KeywordIncrease => "増やす".to_string(),
+            Token::KeywordDecrease => "減らす".to_string(),
+            Token::KeywordUpdate => "更新する".to_string(),
+            _ => return Err("Expected action verb".to_string()),
+        };
+        self.advance();
+        
+        // Target (Expression)
+        let target = self.current_to_expr()?;
+        
+        // "by" or "to" check
+        // "by" is likely Noun("by") as it is not a keyword
+        let is_by = matches!(self.current(), Token::Noun(n) if n == "by");
+        let is_to = matches!(self.current(), Token::KeywordTo);
+        
+        if is_by || is_to {
+            self.advance();
+        }
+        
+        let value = self.current_to_expr()?;
+        
+        Ok(Statement::VariableUpdate { target, value, verb })
     }
 }
 
@@ -1218,6 +1649,50 @@ impl Parser {
 mod tests {
     use super::*;
     use crate::lexer::Lexer;
+
+    // === AGN 2.0 Tests ===
+
+    #[test]
+    fn test_parse_rule() {
+        let mut lexer = Lexer::new("ルール MyRule { X は 1 だ }");
+        let tokens = lexer.tokenize();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse().unwrap();
+        
+        match &program.statements[0] {
+            Statement::RuleDefinition { name, body } => {
+                assert_eq!(name, "MyRule");
+                assert_eq!(body.len(), 1);
+            }
+            _ => panic!("Expected rule definition"),
+        }
+    }
+
+    #[test]
+    fn test_property_update() {
+        // User.Toku を 増やす
+        let mut lexer = Lexer::new("User.Toku を 増やす");
+        let tokens = lexer.tokenize();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse().unwrap();
+        
+        match &program.statements[0] {
+            Statement::VariableUpdate { target, value, verb } => {
+                // target should be PropertyAccess
+                match target {
+                    Expr::PropertyAccess { property, .. } => assert_eq!(property, "Toku"),
+                    _ => panic!("Expected propery access target"),
+                }
+                // value 1.0 (default increment)
+                match value {
+                    Expr::Number(n) => assert_eq!(*n, 1.0),
+                    _ => panic!("Expected number value"),
+                }
+                assert_eq!(verb, "増やす");
+            }
+            _ => panic!("Expected variable update"),
+        }
+    }
 
     #[test]
     fn test_parse_assignment() {
@@ -1228,8 +1703,12 @@ mod tests {
         
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0] {
-            Statement::Assignment { name, value } => {
-                assert_eq!(name, "X");
+            Statement::Assignment { target, value } => {
+                if let Expr::Variable(name) = target {
+                    assert_eq!(name, "X");
+                } else {
+                    panic!("Expected Variable target");
+                }
                 match value {
                     Expr::Number(n) => assert_eq!(*n, 10.0),
                     _ => panic!("Expected number"),
@@ -1249,7 +1728,11 @@ mod tests {
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0] {
             Statement::BinaryOp { target, operand, verb } => {
-                assert_eq!(target, "X");
+                if let Expr::Variable(name) = target {
+                    assert_eq!(name, "X");
+                } else {
+                    panic!("Expected Variable target");
+                }
                 assert_eq!(verb, "足す");
                 match operand {
                     Expr::Number(n) => assert_eq!(*n, 5.0),
@@ -1312,7 +1795,11 @@ mod tests {
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0] {
             Statement::BinaryOp { target, operand, verb } => {
-                assert_eq!(target, "X");
+                if let Expr::Variable(name) = target {
+                    assert_eq!(name, "X");
+                } else {
+                    panic!("Expected Variable target");
+                }
                 assert_eq!(verb, "足す");
                 match operand {
                     Expr::Number(n) => assert_eq!(*n, 5.0),
@@ -1373,8 +1860,12 @@ mod tests {
         
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0] {
-            Statement::Assignment { name, value } => {
-                assert_eq!(name, "X");
+            Statement::Assignment { target, value } => {
+                if let Expr::Variable(name) = target {
+                    assert_eq!(name, "X");
+                } else {
+                    panic!("Expected Variable target");
+                }
                 match value {
                     Expr::Number(n) => assert_eq!(*n, 10.0),
                     _ => panic!("Expected number"),
