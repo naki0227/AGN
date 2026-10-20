@@ -80,7 +80,7 @@ cargo run -- examples/simple_demo.agn
 AGNは、人間と計算機の関わり方を再定義することを目指すオープンソースプロジェクトです。バグレポートや機能提案をお待ちしています。
 
 **Developer**: naki0227  
-**Portfolio**: [enludus.vercel.app](https://enludus.vercel.app)
+**Portfolio**: [enludus.com](https://enludus.com)
 
 ## 📄 ライセンス
 
